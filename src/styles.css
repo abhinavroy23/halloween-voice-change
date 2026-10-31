@@ -71,3 +71,9 @@ select {
 .error { color: var(--danger); background: rgba(255, 84, 112, 0.1); padding: 10px 12px; border-radius: 10px; margin: 0; font-size: 0.9rem; }
 .tips { font-size: 0.82rem; color: var(--muted); padding-left: 18px; line-height: 1.5; margin: 14px 0 0; }
 footer { text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 28px; }
+
+h3 { font-size: 0.95rem; margin: 20px 0 0; }
+.seg { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.seg > span { flex: 1 1 100%; font-size: 0.85rem; color: var(--muted); }
+.seg button { flex: 1; padding: 10px; border-radius: 10px; background: var(--panel-2); font-size: 0.9rem; }
+.seg button.on { background: var(--accent); color: #1a0d00; font-weight: 700; }

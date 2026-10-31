@@ -4,6 +4,11 @@ import { applyTweaks, DEFAULT_TWEAKS, Tweaks, Voice, VOICES } from './voices';
 
 export type Status = 'idle' | 'starting' | 'running' | 'error';
 
+/** 'direct' = Web Audio → speaker; 'element' = Web Audio → <audio> element → speaker. */
+export type OutputMode = 'direct' | 'element';
+/** iOS audio session: 'auto' lets Safari decide, 'play-and-record' forces it. */
+export type SessionMode = 'auto' | 'play-and-record';
+
 export interface MicDevice {
   id: string;
   label: string;
@@ -17,7 +22,9 @@ export interface EngineState {
   activeMicLabel: string;
   voiceId: string;
   tweaks: Record<string, Tweaks>;
-  volume: number; // 0–2
+  volume: number; // 0–3
+  outputMode: OutputMode;
+  sessionMode: SessionMode;
   inputGain: number; // 0–4
   gateDb: number; // -80 … -20
   muted: boolean;
@@ -26,7 +33,10 @@ export interface EngineState {
 }
 
 const STORAGE_KEY = 'ghost-voice-settings-v1';
-type Persisted = Pick<EngineState, 'deviceId' | 'voiceId' | 'tweaks' | 'volume' | 'inputGain' | 'gateDb'>;
+type Persisted = Pick<
+  EngineState,
+  'deviceId' | 'voiceId' | 'tweaks' | 'volume' | 'inputGain' | 'gateDb' | 'outputMode' | 'sessionMode'
+>;
 
 function loadSettings(): Partial<Persisted> {
   try {
@@ -50,6 +60,8 @@ export class AudioEngine {
   private chaosTimer: number | undefined;
   private wakeLock: WakeLockSentinel | null = null;
   private levelBuf = new Float32Array(1024);
+  private outEl: HTMLAudioElement | null = null;
+  private streamDest: MediaStreamAudioDestinationNode | null = null;
 
   constructor() {
     const s = loadSettings();
@@ -61,7 +73,9 @@ export class AudioEngine {
       activeMicLabel: '',
       voiceId: VOICES.some((v) => v.id === s.voiceId) ? s.voiceId! : 'ghost',
       tweaks: s.tweaks ?? {},
-      volume: s.volume ?? 1,
+      volume: s.volume ?? 1.5,
+      outputMode: s.outputMode ?? 'direct',
+      sessionMode: s.sessionMode ?? 'auto',
       inputGain: s.inputGain ?? 1,
       gateDb: s.gateDb ?? -50,
       muted: false,
@@ -81,9 +95,10 @@ export class AudioEngine {
 
   private update(patch: Partial<EngineState>) {
     this.state = { ...this.state, ...patch };
-    const { deviceId, voiceId, tweaks, volume, inputGain, gateDb } = this.state;
+    const { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode } = this.state;
+    const persisted: Persisted = { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode };
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ deviceId, voiceId, tweaks, volume, inputGain, gateDb }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
     } catch {
       /* private mode etc. */
     }
@@ -100,8 +115,7 @@ export class AudioEngine {
     }
     this.update({ status: 'starting', error: null });
     try {
-      const nav = navigator as NavigatorWithAudioSession;
-      if (nav.audioSession) nav.audioSession.type = 'play-and-record';
+      this.applySessionMode();
 
       const ctx = new AudioContext({ latencyHint: 'interactive' });
       this.ctx = ctx;
@@ -111,6 +125,7 @@ export class AudioEngine {
       await resumed;
 
       this.graph = new VoiceGraph(ctx);
+      this.routeOutput();
       this.applyAll();
       ctx.addEventListener('statechange', () => {
         // iOS can "interrupt" the context (calls, Siri, lock). Try to come back.
@@ -137,6 +152,10 @@ export class AudioEngine {
     this.source?.disconnect();
     this.source = null;
     this.graph = null;
+    this.outEl?.pause();
+    if (this.outEl) this.outEl.srcObject = null;
+    this.outEl = null;
+    this.streamDest = null;
     if (this.ctx) await this.ctx.close().catch(() => {});
     this.ctx = null;
     await this.wakeLock?.release().catch(() => {});
@@ -247,6 +266,57 @@ export class AudioEngine {
   setGate(gateDb: number) {
     this.update({ gateDb });
     this.graph?.setGateThreshold(gateDb);
+  }
+
+  /** Call from a tap: the <audio> element needs a user gesture to start playing. */
+  setOutputMode(outputMode: OutputMode) {
+    this.update({ outputMode });
+    this.routeOutput();
+  }
+
+  /** Changing the iOS session type only takes effect on a fresh start, so restart if live. */
+  async setSessionMode(sessionMode: SessionMode) {
+    this.update({ sessionMode });
+    if (this.state.status === 'running') {
+      await this.stop();
+      await this.start();
+    }
+  }
+
+  private applySessionMode() {
+    const nav = navigator as NavigatorWithAudioSession;
+    if (!nav.audioSession) return;
+    try {
+      nav.audioSession.type = this.state.sessionMode;
+    } catch {
+      /* unsupported value */
+    }
+  }
+
+  private routeOutput() {
+    const ctx = this.ctx;
+    const graph = this.graph;
+    if (!ctx || !graph) return;
+    graph.output.disconnect();
+    if (this.state.outputMode === 'element') {
+      if (!this.streamDest) this.streamDest = ctx.createMediaStreamDestination();
+      graph.output.connect(this.streamDest);
+      if (!this.outEl) {
+        this.outEl = new Audio();
+        this.outEl.setAttribute('playsinline', '');
+        this.outEl.autoplay = true;
+      }
+      this.outEl.srcObject = this.streamDest.stream;
+      this.outEl.volume = 1;
+      void this.outEl.play().catch((e) => {
+        console.warn('audio element play failed, falling back to direct', e);
+        this.update({ outputMode: 'direct' });
+        this.routeOutput();
+      });
+    } else {
+      this.outEl?.pause();
+      graph.output.connect(ctx.destination);
+    }
   }
 
   testSpeaker() {

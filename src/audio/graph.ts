@@ -10,11 +10,14 @@ import { getImpulse, makeCrackleBuffer, makeNoiseBuffer } from './impulse';
  *               ├─ pitch B ──────────┼→ ring mod → distortion → tone EQ → comb → tremolo ┬→ dry ───┐
  *               └─ whisper vocoder ──┘                                                   ├→ echo ──┼→ level → limiter → master → speaker
  *                                                                                        └→ reverb ┘
+ *  (the final stage is compressor → makeup gain → volume → limiter → soft clip)
  */
 export class VoiceGraph {
   readonly input: GainNode;
   readonly analyser: AnalyserNode;
   readonly master: GainNode;
+  /** Final output; the engine routes it to the speaker (directly or via an <audio> element). */
+  readonly output: GainNode;
 
   private ctx: AudioContext;
   private gate: AudioWorkletNode;
@@ -164,18 +167,31 @@ export class VoiceGraph {
     fxIn.connect(this.reverb).connect(this.reverbWet).connect(out);
     this.echoWet.connect(this.reverb); // echoes also get reverb
 
-    // --- output -------------------------------------------------------------------
+    // --- output: loudness maximizer --------------------------------------------------
+    // Phone speakers are small and iOS turns playback down while the mic is on, so:
+    // squash dynamics (compressor) → add makeup gain → volume → brickwall limiter → soft clip.
     this.level = g(1);
+    const glue = new DynamicsCompressorNode(ctx, {
+      threshold: -30,
+      knee: 8,
+      ratio: 4,
+      attack: 0.003,
+      release: 0.15,
+    });
+    const makeup = g(4); // ≈ +12 dB
+    this.master = g(1);
     const limiter = new DynamicsCompressorNode(ctx, {
-      threshold: -8,
+      threshold: -3,
       knee: 0,
       ratio: 20,
-      attack: 0.002,
-      release: 0.12,
+      attack: 0.001,
+      release: 0.08,
     });
-    this.master = g(1);
-    out.connect(this.level).connect(limiter).connect(this.master).connect(ctx.destination);
+    const clipper = new WaveShaperNode(ctx, { curve: softClipCurve() });
+    this.output = g(1);
+    out.connect(this.level).connect(glue).connect(makeup).connect(this.master).connect(limiter).connect(clipper).connect(this.output);
   }
+
 
   /** Channel vocoder: the voice's band envelopes shape bands of white noise → whisper. */
   private buildVocoder(src: AudioNode, dest: AudioNode) {
@@ -297,6 +313,18 @@ export class VoiceGraph {
     osc.start(t);
     osc.stop(t + 0.45);
   }
+}
+
+/** Transparent below ~-3 dBFS, rounds off anything the limiter lets through. */
+function softClipCurve() {
+  const n = 4096;
+  const c = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    const a = Math.abs(x);
+    c[i] = a < 0.7 ? x : Math.sign(x) * (0.7 + 0.29 * Math.tanh((a - 0.7) / 0.29));
+  }
+  return c;
 }
 
 function tanhCurve() {

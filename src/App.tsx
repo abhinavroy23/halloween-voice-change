@@ -58,7 +58,7 @@ export default function App() {
             label="Volume"
             value={state.volume}
             min={0}
-            max={2}
+            max={3}
             step={0.05}
             format={pctFmt}
             onChange={(v) => engine.setVolume(v)}
@@ -115,6 +115,32 @@ export default function App() {
           The orange line on the meter is the gate. Sound below it is muted, so the speaker stays quiet when you're not
           talking. Raise it if you hear hiss or feedback.
         </p>
+        <h3>🔈 Too quiet?</h3>
+        <p className="hint">
+          iPhone lowers playback while a website uses the mic. Turn the phone volume all the way up, then try these
+          (test with the beep and your voice):
+        </p>
+        <div className="seg" role="group" aria-label="Output route">
+          <span>Output route</span>
+          <button className={state.outputMode === 'direct' ? 'on' : ''} onClick={() => engine.setOutputMode('direct')}>
+            Direct
+          </button>
+          <button className={state.outputMode === 'element' ? 'on' : ''} onClick={() => engine.setOutputMode('element')}>
+            Media player
+          </button>
+        </div>
+        <div className="seg" role="group" aria-label="iPhone audio mode">
+          <span>iPhone audio mode</span>
+          <button className={state.sessionMode === 'auto' ? 'on' : ''} onClick={() => void engine.setSessionMode('auto')}>
+            Auto
+          </button>
+          <button
+            className={state.sessionMode === 'play-and-record' ? 'on' : ''}
+            onClick={() => void engine.setSessionMode('play-and-record')}
+          >
+            Play &amp; record
+          </button>
+        </div>
         <button className="small wide" onClick={() => engine.testSpeaker()} disabled={!running}>
           🔔 Test speaker beep
         </button>
