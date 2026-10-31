@@ -112,7 +112,11 @@ class PitchTracker {
  */
 class Psola extends AudioWorkletProcessor {
   static get parameterDescriptors() {
-    return [{ name: 'semitones', defaultValue: 0, minValue: -24, maxValue: 24, automationRate: 'a-rate' }];
+    return [
+      { name: 'semitones', defaultValue: 0, minValue: -24, maxValue: 24, automationRate: 'a-rate' },
+      // Formant scale: <1 = bigger/darker vocal tract (e.g. 0.88 = 12% lower resonances), >1 = smaller.
+      { name: 'formant', defaultValue: 1, minValue: 0.5, maxValue: 2, automationRate: 'k-rate' },
+    ];
   }
 
   constructor() {
@@ -137,6 +141,7 @@ class Psola extends AudioWorkletProcessor {
     const out = output[0];
     if (!out) return true;
     const semis = parameters.semitones;
+    const fr = parameters.formant[0];
     const { inBuf, outBuf, mask, tracker } = this;
     for (let n = 0; n < out.length; n++) {
       const x = input ? input[n] : 0;
@@ -171,14 +176,30 @@ class Psola extends AudioWorkletProcessor {
           this.lastMark = cand;
         }
         let mark = this.lastMark;
-        if (mark + T > this.w) mark = this.w - T;
+        const reach = Math.ceil(T * fr) + 1;
+        if (mark + reach > this.w) mark = this.w - reach;
         const g = voiced ? Math.min(2, Math.max(0.5, 1 / ratio)) : 1;
         const inv = Math.PI / T;
-        for (let k = -T; k < T; k++) {
-          const pos = s + k;
-          if (pos < o) continue;
-          const win = 0.5 + 0.5 * Math.cos(k * inv);
-          outBuf[pos & mask] += inBuf[(mark + k) & mask] * win * g;
+        if (fr === 1) {
+          for (let k = -T; k < T; k++) {
+            const pos = s + k;
+            if (pos < o) continue;
+            const win = 0.5 + 0.5 * Math.cos(k * inv);
+            outBuf[pos & mask] += inBuf[(mark + k) & mask] * win * g;
+          }
+        } else {
+          // Read the grain at a different speed: its spectral envelope (formants) scales by fr
+          // while the grain spacing – and therefore the pitch – stays as set above.
+          for (let k = -T; k < T; k++) {
+            const pos = s + k;
+            if (pos < o) continue;
+            const win = 0.5 + 0.5 * Math.cos(k * inv);
+            const xi = mark + k * fr;
+            const i0 = Math.floor(xi);
+            const f = xi - i0;
+            const a = inBuf[i0 & mask];
+            outBuf[pos & mask] += (a + (inBuf[(i0 + 1) & mask] - a) * f) * win * g;
+          }
         }
         this.nextS += voiced ? T / ratio : T;
       }

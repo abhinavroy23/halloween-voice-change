@@ -13,9 +13,15 @@ export interface VoiceParams {
   /** Main voice: formant-preserving pitch shift (semitones) and level. */
   pitch: number;
   main: number;
+  /** Formant scale of the main voice: <1 sounds bigger (0.88 ≈ 12% larger), >1 smaller. */
+  formant: number;
   /** Character layer: formant-shifting pitch (semitones), level, distortion, tone. */
   layerPitch: number;
   layer: number;
+  /** 'psola' = clean & tight (monsters), 'granular' = warbly (ghost/child). */
+  layerEngine: 'psola' | 'granular';
+  /** Formant scale for the PSOLA layer. */
+  layerFormant: number;
   layerDrive: number; // 0–1
   layerTone: number; // low-pass Hz on the layer
   /** Vibrato on both voices. */
@@ -73,8 +79,11 @@ export interface Voice {
 export const BASE: VoiceParams = {
   pitch: 0,
   main: 1,
+  formant: 1,
   layerPitch: 0,
   layer: 0,
+  layerEngine: 'granular',
+  layerFormant: 1,
   layerDrive: 0,
   layerTone: 3000,
   vibratoRate: 5,
@@ -144,20 +153,24 @@ export const VOICES: Voice[] = [
     duck: 14,
   }),
   v('demon', 'Demon', '😈', 'Deep, gravelly, from below', {
-    pitch: -5,
+    // Clear words: main voice only -4 st (PSOLA keeps vowels) with a slightly bigger vocal
+    // tract; the monster growl is a time-aligned PSOLA octave-down layer kept below 900 Hz.
+    // No reverb by default (biggest clarity win) – add some with Tune → Reverb.
+    pitch: -4,
+    formant: 0.9,
+    layerEngine: 'psola',
     layerPitch: -12,
-    layer: 0.65,
-    layerDrive: 0.5,
-    layerTone: 1800,
-    highpass: 70,
-    bass: 3,
+    layerFormant: 0.72,
+    layer: 0.45,
+    layerDrive: 0.3,
+    layerTone: 900,
+    highpass: 90,
+    bass: 0,
     presence: 5,
-    air: 1,
-    reverbMix: 0.25,
-    reverbSeconds: 1.4,
-    preDelay: 0.03,
-    duck: 10,
-    level: 0.9,
+    air: 2,
+    reverbMix: 0,
+    duck: 14,
+    level: 1,
   }),
   v('possessed', 'Possessed', '🫥', 'Two voices at once, one not yours', {
     pitch: 0,

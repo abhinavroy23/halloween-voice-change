@@ -25,8 +25,8 @@ Repo **Settings → Pages → Source: GitHub Actions**. Every push to `main` bui
 ## How it works
 `src/audio/AudioEngine.ts` (mic, lifecycle, settings) → `src/audio/graph.ts`, one persistent Web Audio chain built for clarity:
 
-- **Main voice**: TD-PSOLA pitch shifter (keeps vowel formants, so shifted speech stays understandable)
-- **Character layer** underneath: granular shifter (moves formants: monster or child) with its own distortion
+- **Main voice**: TD-PSOLA pitch shifter (keeps vowel formants, so shifted speech stays understandable) with optional formant scaling
+- **Character layer** underneath: PSOLA with formant shift (monsters) or granular shifter (ghost/child), time-aligned with the main voice, with its own distortion
 - Whisper vocoder, ring mod, comb and tremolo, then a **clarity EQ** (mud cut, presence and air boost) and the **voice compressor**
 - Reverb and echo as sends with **pre-delay**, EQ'd, and **ducked** while you speak
 - **Clarity** slider blends a clean copy of the main voice past the weird effects

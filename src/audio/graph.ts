@@ -5,8 +5,8 @@ import { getImpulse, makeCrackleBuffer, makeNoiseBuffer } from './impulse';
  * One persistent effect chain, built for clarity. Voices only change parameter values on
  * it (with short ramps), so switching voices never rebuilds nodes and never pops.
  *
- *  mic → gate/echo-guard ┬→ MAIN (PSOLA, keeps vowels) ─────┬──────────────────────── clarity ─┐
- *                        ├→ LAYER (granular + its own grit) ─┤                                   │
+ *  mic → gate/echo-guard ┬→ MAIN (PSOLA + formant) ─────────┬──────────────────────── clarity ─┐
+ *                        ├→ LAYER (PSOLA/granular + grit) ───┤                                   │
  *                        └→ whisper vocoder ─────────────────┴→ ring → drive → comb → tremolo ──┴→ clarity EQ
  *    → voice compressor ┬→ direct ───────────────────────────────────────────┐
  *                       ├→ echo send ──────────────┐                          ├→ volume → limiter → soft clip → speaker
@@ -23,6 +23,9 @@ export class VoiceGraph {
   private gate: AudioWorkletNode;
   private psola: AudioWorkletNode;
   private layerShift: AudioWorkletNode;
+  private layerPsola: AudioWorkletNode;
+  private layerGranGain: GainNode;
+  private layerPsolaGain: GainNode;
   private mainGain: GainNode;
   private clarityGain: GainNode;
   private layerClean: GainNode;
@@ -90,8 +93,17 @@ export class VoiceGraph {
     this.gate.connect(this.psola).connect(this.mainGain).connect(voiceSum);
     this.mainGain.connect(this.clarityGain).connect(eqIn); // clean copy that skips the weird FX
 
-    // --- character LAYER: formant-shifting pitch + its own distortion ------------------
+    // --- character LAYER: pitch + formant shift + its own distortion -------------------
+    // Two engines: PSOLA (clean, tight – monsters) or granular (warbly – ghost/child).
+    // Both are time-aligned with the main voice so the layers don't smear the words.
     this.layerShift = new AudioWorkletNode(ctx, 'pitch-shifter', mono);
+    this.layerPsola = new AudioWorkletNode(ctx, 'psola', mono);
+    this.layerGranGain = g(0);
+    this.layerPsolaGain = g(0);
+    const granAlign = new DelayNode(ctx, { maxDelayTime: 0.05, delayTime: 0.01 });
+    const layerIn = g(1);
+    this.gate.connect(this.layerShift).connect(granAlign).connect(this.layerGranGain).connect(layerIn);
+    this.gate.connect(this.layerPsola).connect(this.layerPsolaGain).connect(layerIn);
     const layerSum = g(1);
     this.layerClean = g(1);
     this.layerPre = g(1);
@@ -99,9 +111,8 @@ export class VoiceGraph {
     this.layerDist = g(0);
     this.layerLp = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 3000, Q: 0.6 });
     this.layerGain = g(0);
-    this.gate.connect(this.layerShift);
-    this.layerShift.connect(this.layerClean).connect(layerSum);
-    this.layerShift.connect(this.layerPre).connect(layerShaper).connect(this.layerDist).connect(layerSum);
+    layerIn.connect(this.layerClean).connect(layerSum);
+    layerIn.connect(this.layerPre).connect(layerShaper).connect(this.layerDist).connect(layerSum);
     layerSum.connect(this.layerLp).connect(this.layerGain).connect(voiceSum);
 
     this.vibOsc = new OscillatorNode(ctx, { frequency: 5 });
@@ -109,6 +120,7 @@ export class VoiceGraph {
     this.vibOsc.connect(this.vibDepth);
     this.vibDepth.connect(this.psola.parameters.get('semitones')!);
     this.vibDepth.connect(this.layerShift.parameters.get('semitones')!);
+    this.vibDepth.connect(this.layerPsola.parameters.get('semitones')!);
     this.vibOsc.start();
 
     // --- whisper vocoder --------------------------------------------------------------
@@ -294,9 +306,15 @@ export class VoiceGraph {
   apply(p: VoiceParams, clarity: number) {
     const isPlain = p.whisper === 0 && p.ringMix === 0 && p.combMix === 0 && p.distMix === 0 && p.layer === 0;
     this.setPitch(p.pitch);
+    this.set(this.psola.parameters.get('formant')!, p.formant, 0.01);
     this.set(this.mainGain.gain, p.main);
     this.set(this.clarityGain.gain, isPlain ? 0 : clarity * 0.8);
     this.set(this.layerShift.parameters.get('semitones')!, p.layerPitch);
+    this.set(this.layerPsola.parameters.get('semitones')!, p.layerPitch);
+    this.set(this.layerPsola.parameters.get('formant')!, p.layerFormant, 0.01);
+    const psolaLayer = p.layerEngine === 'psola';
+    this.set(this.layerPsolaGain.gain, psolaLayer ? 1 : 0);
+    this.set(this.layerGranGain.gain, psolaLayer ? 0 : 1);
     this.set(this.layerGain.gain, p.layer);
     const layerMix = Math.min(1, p.layerDrive * 2);
     this.set(this.layerClean.gain, 1 - layerMix);
