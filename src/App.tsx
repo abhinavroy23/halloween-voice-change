@@ -1,0 +1,131 @@
+import { useEffect, useState } from 'react';
+import { useAudioEngine } from './hooks/useAudioEngine';
+import { VoiceGrid } from './components/VoiceGrid';
+import { DevicePicker } from './components/DevicePicker';
+import { LevelMeter } from './components/LevelMeter';
+import { Slider } from './components/Slider';
+
+const signed = (v: number) => (v > 0 ? `+${v}` : `${v}`);
+const pctFmt = (v: number) => `${Math.round(v * 100)}%`;
+
+export default function App() {
+  const { state, engine } = useAudioEngine();
+  const [showTune, setShowTune] = useState(false);
+  const [showSetup, setShowSetup] = useState(false);
+  const running = state.status === 'running';
+  const voice = engine.voice;
+  const tweaks = engine.tweaksFor(state.voiceId);
+
+  useEffect(() => {
+    void engine.refreshDevices();
+  }, [engine]);
+
+  return (
+    <div className="app">
+      <header>
+        <h1>
+          <span aria-hidden>👻</span> Ghost Voice
+        </h1>
+        {running && (
+          <span className="status">
+            <span className="dot" /> LIVE{state.latencyMs ? ` · ~${state.latencyMs} ms` : ''}
+          </span>
+        )}
+      </header>
+
+      {!running ? (
+        <section className="start">
+          <button className="big start-btn" onClick={() => void engine.start()} disabled={state.status === 'starting'}>
+            {state.status === 'starting' ? 'Summoning…' : 'Tap to Summon 🕯️'}
+          </button>
+          <p className="hint">
+            Allow microphone access. Start with <b>Clean</b> at low volume to check the speaker, then pick a ghost.
+          </p>
+          {state.error && <p className="error">{state.error}</p>}
+        </section>
+      ) : (
+        <section className="live">
+          <div className="row">
+            <button className={`big mute ${state.muted ? 'on' : ''}`} onClick={() => engine.toggleMute()}>
+              {state.muted ? '🔇 Muted' : '🔊 On'}
+            </button>
+            <button className="big stop" onClick={() => void engine.stop()}>
+              ⏹ Stop
+            </button>
+          </div>
+          <LevelMeter gateDb={state.gateDb} active={running} />
+          <Slider
+            label="Volume"
+            value={state.volume}
+            min={0}
+            max={2}
+            step={0.05}
+            format={pctFmt}
+            onChange={(v) => engine.setVolume(v)}
+          />
+          {state.error && <p className="error">{state.error}</p>}
+        </section>
+      )}
+
+      <h2>
+        {voice.emoji} {voice.name}
+      </h2>
+      <VoiceGrid voiceId={state.voiceId} onSelect={(id) => engine.selectVoice(id)} />
+
+      <details open={showTune} onToggle={(e) => setShowTune((e.target as HTMLDetailsElement).open)}>
+        <summary>🎛️ Tune “{voice.name}”</summary>
+        <Slider label="Pitch" value={tweaks.pitch} min={-12} max={12} step={1} format={(v) => `${signed(v)} st`} onChange={(v) => engine.setTweak('pitch', v)} />
+        <Slider label="Reverb" value={tweaks.reverb} min={0} max={2} step={0.05} format={pctFmt} onChange={(v) => engine.setTweak('reverb', v)} />
+        <Slider label="Echo" value={tweaks.echo} min={0} max={2} step={0.05} format={pctFmt} onChange={(v) => engine.setTweak('echo', v)} />
+        <Slider label="Grit" value={tweaks.grit} min={0} max={1} step={0.05} format={pctFmt} onChange={(v) => engine.setTweak('grit', v)} />
+        <button className="small wide" onClick={() => engine.resetTweaks()}>
+          Reset this voice
+        </button>
+      </details>
+
+      <details open={showSetup} onToggle={(e) => setShowSetup((e.target as HTMLDetailsElement).open)}>
+        <summary>🎙️ Microphone & setup</summary>
+        <DevicePicker
+          devices={state.devices}
+          deviceId={state.deviceId}
+          activeLabel={state.activeMicLabel}
+          running={running}
+          onSelect={(id) => void engine.selectDevice(id)}
+          onRefresh={() => void engine.refreshDevices()}
+        />
+        <Slider
+          label="Mic gain"
+          value={state.inputGain}
+          min={0}
+          max={4}
+          step={0.05}
+          format={(v) => `${v.toFixed(2)}×`}
+          onChange={(v) => engine.setInputGain(v)}
+        />
+        <Slider
+          label="Silence gate"
+          value={state.gateDb}
+          min={-80}
+          max={-20}
+          step={1}
+          format={(v) => `${v} dB`}
+          onChange={(v) => engine.setGate(v)}
+        />
+        <p className="hint">
+          The orange line on the meter is the gate. Sound below it is muted, so the speaker stays quiet when you're not
+          talking. Raise it if you hear hiss or feedback.
+        </p>
+        <button className="small wide" onClick={() => engine.testSpeaker()} disabled={!running}>
+          🔔 Test speaker beep
+        </button>
+        <ul className="tips">
+          <li>Keep the phone speaker pointing away from the mic to avoid howling feedback.</li>
+          <li>Use the phone volume buttons for overall loudness; avoid Bluetooth speakers (they add a delay).</li>
+          <li>Add to Home Screen (Share → Add to Home Screen) for a fullscreen app.</li>
+          <li>Screen stays awake while live{state.wakeLock ? ' ✓' : ''}. Keep this tab in front.</li>
+        </ul>
+      </details>
+      <footer>Happy Halloween 🎃</footer>
+    </div>
+  );
+}
