@@ -15,6 +15,8 @@ export interface VoiceParams {
   main: number;
   /** Formant scale of the main voice: <1 sounds bigger (0.88 ≈ 12% larger), >1 smaller. */
   formant: number;
+  /** Growl texture on the main voice (period-doubling roughness), 0–1. */
+  roughness: number;
   /** Character layer: formant-shifting pitch (semitones), level, distortion, tone. */
   layerPitch: number;
   layer: number;
@@ -29,6 +31,10 @@ export interface VoiceParams {
   vibratoDepth: number; // semitones
   /** Whisper vocoder (voice → breathy noise). */
   whisper: number;
+  /** Synth vocoder (voice → pitch-following dark synth), its pitch vs yours, and fifth amount. */
+  vocoder: number;
+  vocPitch: number;
+  vocChord: number;
   /** Ring modulator. */
   ringFreq: number;
   ringMix: number;
@@ -80,6 +86,7 @@ export const BASE: VoiceParams = {
   pitch: 0,
   main: 1,
   formant: 1,
+  roughness: 0,
   layerPitch: 0,
   layer: 0,
   layerEngine: 'granular',
@@ -89,6 +96,9 @@ export const BASE: VoiceParams = {
   vibratoRate: 5,
   vibratoDepth: 0,
   whisper: 0,
+  vocoder: 0,
+  vocPitch: -12,
+  vocChord: 0.5,
   ringFreq: 50,
   ringMix: 0,
   drive: 0,
@@ -152,25 +162,34 @@ export const VOICES: Voice[] = [
     echoMix: 0.12,
     duck: 14,
   }),
-  v('demon', 'Demon', '😈', 'Deep, gravelly, from below', {
-    // Clear words: main voice only -4 st (PSOLA keeps vowels) with a slightly bigger vocal
-    // tract; the monster growl is a time-aligned PSOLA octave-down layer kept below 900 Hz.
-    // No reverb by default (biggest clarity win) – add some with Tune → Reverb.
-    pitch: -4,
-    formant: 0.9,
-    layerEngine: 'psola',
-    layerPitch: -12,
-    layerFormant: 0.72,
-    layer: 0.45,
-    layerDrive: 0.3,
-    layerTone: 900,
-    highpass: 90,
-    bass: 0,
+  v('demon', 'Demon', '😈', 'Huge, rough, still clear', {
+    // One transformed voice instead of a muddy octave layer: lower pitch AND a bigger vocal
+    // tract (formants ×0.82) so it stops sounding like you; growl comes from period-doubling
+    // roughness at the same formants (no mud); crisp presence; dry (add Grit/Reverb in the Lab).
+    pitch: -6,
+    formant: 0.82,
+    roughness: 0.45,
+    highpass: 100,
     presence: 5,
     air: 2,
-    reverbMix: 0,
     duck: 14,
-    level: 1,
+  }),
+  v('vocoder-demon', 'Vocoder Demon', '👹', 'Your words played on a dark synth', {
+    // Your voice shapes a pitch-following buzzy chord (root an octave down + sub + fifth).
+    // A quiet transformed copy of your voice underneath keeps the words easy to follow.
+    vocoder: 1,
+    vocPitch: -12,
+    vocChord: 0.5,
+    main: 0.15,
+    pitch: -6,
+    formant: 0.85,
+    highpass: 80,
+    presence: 4,
+    air: 2,
+    reverbMix: 0.1,
+    reverbSeconds: 1.2,
+    preDelay: 0.02,
+    duck: 14,
   }),
   v('possessed', 'Possessed', '🫥', 'Two voices at once, one not yours', {
     pitch: 0,
@@ -283,12 +302,15 @@ export const VOICES: Voice[] = [
 /** The user-tweakable knobs, applied on top of a preset. */
 export interface Tweaks {
   pitch: number; // semitone offset
+  size: number; // formant multiplier: <1 bigger creature, >1 smaller
+  growl: number; // added roughness 0–1
+  grit: number; // added distortion 0–1
+  darkness: number; // -1 brighter … +1 darker
   reverb: number; // multiplier 0–2
   echo: number; // multiplier 0–2
-  grit: number; // added distortion 0–1
 }
 
-export const DEFAULT_TWEAKS: Tweaks = { pitch: 0, reverb: 1, echo: 1, grit: 0 };
+export const DEFAULT_TWEAKS: Tweaks = { pitch: 0, size: 1, growl: 0, grit: 0, darkness: 0, reverb: 1, echo: 1 };
 
 export function applyTweaks(p: VoiceParams, t: Tweaks): VoiceParams {
   const boost = (base: number, mult: number, extra: number) =>
@@ -296,14 +318,19 @@ export function applyTweaks(p: VoiceParams, t: Tweaks): VoiceParams {
   return {
     ...p,
     pitch: p.pitch + t.pitch,
+    formant: Math.min(1.6, Math.max(0.6, p.formant * t.size)),
+    layerFormant: Math.min(1.6, Math.max(0.5, p.layerFormant * t.size)),
+    roughness: Math.min(1, p.roughness + t.growl),
+    presence: p.presence - t.darkness * 4,
+    air: p.air - t.darkness * 4,
+    lowpass: t.darkness > 0 ? Math.min(p.lowpass, 16000 * Math.pow(0.25, t.darkness)) : p.lowpass,
     reverbMix: boost(p.reverbMix, t.reverb, 0.5),
     echoMix: boost(p.echoMix, t.echo, 0.4),
-    // Grit goes mostly on the layer so the main voice stays clear.
+    // Grit = saturation on the voice itself (and on the layer, if the voice has one).
+    // It never adds an octave-down layer: that's what made voices muddy.
+    layerPitch: p.layerPitch + t.pitch,
     layerDrive: Math.min(1, p.layerDrive + t.grit),
-    layer: p.layer > 0 ? p.layer : t.grit * 0.5,
-    layerPitch: p.layer > 0 ? p.layerPitch + t.pitch : -12 + t.pitch,
-    layerTone: p.layer > 0 ? p.layerTone : 2000,
-    drive: Math.min(1, p.drive + t.grit * 0.3),
-    distMix: Math.min(1, p.distMix + t.grit * 0.2),
+    drive: Math.min(1, p.drive + t.grit * 0.6),
+    distMix: Math.min(1, p.distMix + t.grit * 0.5),
   };
 }

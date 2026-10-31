@@ -7,7 +7,7 @@ import { getImpulse, makeCrackleBuffer, makeNoiseBuffer } from './impulse';
  *
  *  mic → gate/echo-guard ┬→ MAIN (PSOLA + formant) ─────────┬──────────────────────── clarity ─┐
  *                        ├→ LAYER (PSOLA/granular + grit) ───┤                                   │
- *                        └→ whisper vocoder ─────────────────┴→ ring → drive → comb → tremolo ──┴→ clarity EQ
+ *                        └→ whisper / synth vocoders ────────┴→ ring → drive → comb → tremolo ──┴→ clarity EQ
  *    → voice compressor ┬→ direct ───────────────────────────────────────────┐
  *                       ├→ echo send ──────────────┐                          ├→ volume → limiter → soft clip → speaker
  *                       └→ reverb send (pre-delay) ┴→ EQ → ducker (voice key) ┘
@@ -36,6 +36,8 @@ export class VoiceGraph {
   private vibOsc: OscillatorNode;
   private vibDepth: GainNode;
   private whisperOut: GainNode;
+  private vocoderOut: GainNode;
+  private carrier: AudioWorkletNode;
   private ringDry: GainNode;
   private ringOsc: OscillatorNode;
   private ringDepth: GainNode;
@@ -125,8 +127,19 @@ export class VoiceGraph {
 
     // --- whisper vocoder --------------------------------------------------------------
     this.whisperOut = g(0);
-    this.buildVocoder(this.gate, this.whisperOut);
+    const noise = new AudioBufferSourceNode(ctx, { buffer: makeNoiseBuffer(ctx), loop: true });
+    noise.start();
+    this.buildVocoder(this.gate, noise, this.whisperOut, { bands: 16, lo: 180, hi: 7500, q: 6, smooth: 35, makeup: 6 });
     this.whisperOut.connect(voiceSum);
+
+    // --- synth vocoder (Vocoder Demon): your voice "plays" a pitch-following dark synth ---
+    this.vocoderOut = g(0);
+    this.carrier = new AudioWorkletNode(ctx, 'vocoder-carrier', mono);
+    this.gate.connect(this.carrier);
+    this.buildVocoder(this.gate, this.carrier, this.vocoderOut, { bands: 22, lo: 100, hi: 8000, q: 5, smooth: 50, makeup: 9 });
+    // Line the vocoder up with the PSOLA voice (≈27 ms later) so mixing them doesn't smear.
+    const vocAlign = new DelayNode(ctx, { maxDelayTime: 0.1, delayTime: psolaLatency(ctx.sampleRate) });
+    this.vocoderOut.connect(vocAlign).connect(voiceSum);
 
     // --- ring modulator -----------------------------------------------------------
     const ringOut = g(1);
@@ -248,27 +261,27 @@ export class VoiceGraph {
     this.output.connect(sideDelay).connect(this.gate, 0, 1);
   }
 
-  /** Channel vocoder: the voice's band envelopes shape bands of white noise → whisper. */
-  private buildVocoder(src: AudioNode, dest: AudioNode) {
+  /** Channel vocoder: the voice's band envelopes shape the matching bands of a carrier. */
+  private buildVocoder(
+    src: AudioNode,
+    carrier: AudioNode,
+    dest: AudioNode,
+    o: { bands: number; lo: number; hi: number; q: number; smooth: number; makeup: number },
+  ) {
     const ctx = this.ctx;
-    const noise = new AudioBufferSourceNode(ctx, { buffer: makeNoiseBuffer(ctx), loop: true });
-    noise.start();
     const rect = new Float32Array(1025);
     for (let i = 0; i < rect.length; i++) rect[i] = Math.abs(i / 512 - 1);
-    const bands = 16;
-    const lo = 180;
-    const hi = 7500;
-    const makeup = new GainNode(ctx, { gain: 6 });
+    const makeup = new GainNode(ctx, { gain: o.makeup });
     makeup.connect(dest);
-    for (let b = 0; b < bands; b++) {
-      const f = lo * Math.pow(hi / lo, b / (bands - 1));
-      const analysis = new BiquadFilterNode(ctx, { type: 'bandpass', frequency: f, Q: 6 });
+    for (let b = 0; b < o.bands; b++) {
+      const f = o.lo * Math.pow(o.hi / o.lo, b / (o.bands - 1));
+      const analysis = new BiquadFilterNode(ctx, { type: 'bandpass', frequency: f, Q: o.q });
       const abs = new WaveShaperNode(ctx, { curve: rect });
-      const smooth = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 35 });
-      const carrierBand = new BiquadFilterNode(ctx, { type: 'bandpass', frequency: f, Q: 6 });
+      const smooth = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: o.smooth });
+      const carrierBand = new BiquadFilterNode(ctx, { type: 'bandpass', frequency: f, Q: o.q });
       const vca = new GainNode(ctx, { gain: 0 });
       src.connect(analysis).connect(abs).connect(smooth).connect(vca.gain);
-      noise.connect(carrierBand).connect(vca).connect(makeup);
+      carrier.connect(carrierBand).connect(vca).connect(makeup);
     }
   }
 
@@ -304,9 +317,11 @@ export class VoiceGraph {
    * past the weird effects, turns the reverb/echo sends down and ducks them harder.
    */
   apply(p: VoiceParams, clarity: number) {
-    const isPlain = p.whisper === 0 && p.ringMix === 0 && p.combMix === 0 && p.distMix === 0 && p.layer === 0;
+    const isPlain =
+      p.whisper === 0 && p.vocoder === 0 && p.ringMix === 0 && p.combMix === 0 && p.distMix === 0 && p.layer === 0;
     this.setPitch(p.pitch);
     this.set(this.psola.parameters.get('formant')!, p.formant, 0.01);
+    this.set(this.psola.parameters.get('roughness')!, p.roughness, 0.01);
     this.set(this.mainGain.gain, p.main);
     this.set(this.clarityGain.gain, isPlain ? 0 : clarity * 0.8);
     this.set(this.layerShift.parameters.get('semitones')!, p.layerPitch);
@@ -326,6 +341,9 @@ export class VoiceGraph {
     this.set(this.vibOsc.frequency, p.vibratoRate);
     this.set(this.vibDepth.gain, p.vibratoDepth);
     this.set(this.whisperOut.gain, p.whisper);
+    this.set(this.vocoderOut.gain, p.vocoder);
+    this.set(this.carrier.parameters.get('semitones')!, p.vocPitch, 0.01);
+    this.set(this.carrier.parameters.get('chord')!, p.vocChord, 0.01);
 
     this.set(this.ringOsc.frequency, p.ringFreq);
     this.set(this.ringDry.gain, 1 - p.ringMix);
@@ -397,6 +415,11 @@ export class VoiceGraph {
     osc.start(t);
     osc.stop(t + 0.45);
   }
+}
+
+/** Must match the PSOLA worklet: 2 × the longest tracked period (75 Hz) + 8 samples. */
+function psolaLatency(sr: number) {
+  return (2 * Math.ceil(sr / 75) + 8) / sr;
 }
 
 /** Transparent below ~-3 dBFS, rounds off anything the limiter lets through. */

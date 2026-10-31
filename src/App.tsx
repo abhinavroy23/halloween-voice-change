@@ -82,11 +82,31 @@ export default function App() {
       <VoiceGrid voiceId={state.voiceId} onSelect={(id) => engine.selectVoice(id)} />
 
       <details open={showTune} onToggle={(e) => setShowTune((e.target as HTMLDetailsElement).open)}>
-        <summary>🎛️ Tune “{voice.name}”</summary>
+        <summary>🧪 Voice Lab: tune “{voice.name}”</summary>
+        <p className="hint">Changes are saved on this phone for this voice. Tune by ear on your real mic and speaker.</p>
         <Slider label="Pitch" value={tweaks.pitch} min={-12} max={12} step={1} format={(v) => `${signed(v)} st`} onChange={(v) => engine.setTweak('pitch', v)} />
+        <Slider
+          label="Size  (bigger ↔ smaller)"
+          value={tweaks.size}
+          min={0.7}
+          max={1.3}
+          step={0.01}
+          format={(v) => (v === 1 ? 'preset' : v < 1 ? `${Math.round((1 - v) * 100)}% bigger` : `${Math.round((v - 1) * 100)}% smaller`)}
+          onChange={(v) => engine.setTweak('size', v)}
+        />
+        <Slider label="Growl" value={tweaks.growl} min={0} max={1} step={0.05} format={pctFmt} onChange={(v) => engine.setTweak('growl', v)} />
+        <Slider label="Grit" value={tweaks.grit} min={0} max={1} step={0.05} format={pctFmt} onChange={(v) => engine.setTweak('grit', v)} />
+        <Slider
+          label="Darkness  (brighter ↔ darker)"
+          value={tweaks.darkness}
+          min={-1}
+          max={1}
+          step={0.05}
+          format={(v) => (v === 0 ? 'preset' : `${signed(Math.round(v * 100))}%`)}
+          onChange={(v) => engine.setTweak('darkness', v)}
+        />
         <Slider label="Reverb" value={tweaks.reverb} min={0} max={2} step={0.05} format={pctFmt} onChange={(v) => engine.setTweak('reverb', v)} />
         <Slider label="Echo" value={tweaks.echo} min={0} max={2} step={0.05} format={pctFmt} onChange={(v) => engine.setTweak('echo', v)} />
-        <Slider label="Grit" value={tweaks.grit} min={0} max={1} step={0.05} format={pctFmt} onChange={(v) => engine.setTweak('grit', v)} />
         <button className="small wide" onClick={() => engine.resetTweaks()}>
           Reset this voice
         </button>

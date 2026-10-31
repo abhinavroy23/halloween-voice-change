@@ -116,6 +116,9 @@ class Psola extends AudioWorkletProcessor {
       { name: 'semitones', defaultValue: 0, minValue: -24, maxValue: 24, automationRate: 'a-rate' },
       // Formant scale: <1 = bigger/darker vocal tract (e.g. 0.88 = 12% lower resonances), >1 = smaller.
       { name: 'formant', defaultValue: 1, minValue: 0.5, maxValue: 2, automationRate: 'k-rate' },
+      // Growl: alternate loud/soft pitch periods (+ a little random shimmer/jitter) →
+      // period-doubling roughness like a real growl/vocal fry, at the same formants (no mud).
+      { name: 'roughness', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
     ];
   }
 
@@ -133,6 +136,7 @@ class Psola extends AudioWorkletProcessor {
     this.w = 0; // input write time
     this.nextS = 0; // next synthesis grain centre (output time)
     this.lastMark = 0; // last analysis pitch mark (input time)
+    this.grainCount = 0;
   }
 
   process(inputs, outputs, parameters) {
@@ -142,6 +146,7 @@ class Psola extends AudioWorkletProcessor {
     if (!out) return true;
     const semis = parameters.semitones;
     const fr = parameters.formant[0];
+    const rough = parameters.roughness[0];
     const { inBuf, outBuf, mask, tracker } = this;
     for (let n = 0; n < out.length; n++) {
       const x = input ? input[n] : 0;
@@ -176,9 +181,13 @@ class Psola extends AudioWorkletProcessor {
           this.lastMark = cand;
         }
         let mark = this.lastMark;
-        const reach = Math.ceil(T * fr) + 1;
+        const reach = Math.ceil(T * fr) + 3;
         if (mark + reach > this.w) mark = this.w - reach;
-        const g = voiced ? Math.min(2, Math.max(0.5, 1 / ratio)) : 1;
+        let g = voiced ? Math.min(2, Math.max(0.5, 1 / ratio)) : 1;
+        if (voiced && rough > 0) {
+          const alt = this.grainCount++ & 1 ? 1 - 0.8 * rough : 1;
+          g *= alt * (1 + (Math.random() - 0.5) * 0.5 * rough);
+        }
         const inv = Math.PI / T;
         if (fr === 1) {
           for (let k = -T; k < T; k++) {
@@ -197,11 +206,17 @@ class Psola extends AudioWorkletProcessor {
             const xi = mark + k * fr;
             const i0 = Math.floor(xi);
             const f = xi - i0;
-            const a = inBuf[i0 & mask];
-            outBuf[pos & mask] += (a + (inBuf[(i0 + 1) & mask] - a) * f) * win * g;
+            // Catmull-Rom cubic interpolation (linear would dull the highs = muffled)
+            const y0 = inBuf[(i0 - 1) & mask];
+            const y1 = inBuf[i0 & mask];
+            const y2 = inBuf[(i0 + 1) & mask];
+            const y3 = inBuf[(i0 + 2) & mask];
+            const v = y1 + 0.5 * f * (y2 - y0 + f * (2 * y0 - 5 * y1 + 4 * y2 - y3 + f * (3 * (y1 - y2) + y3 - y0)));
+            outBuf[pos & mask] += v * win * g;
           }
         }
-        this.nextS += voiced ? T / ratio : T;
+        const hop = voiced ? T / ratio : T;
+        this.nextS += rough > 0 && voiced ? hop * (1 + (Math.random() - 0.5) * 0.06 * rough) : hop;
       }
 
       if (o >= 0) {
@@ -380,7 +395,79 @@ class Ducker extends AudioWorkletProcessor {
   }
 }
 
+/**
+ * Carrier for the Vocoder Demon: a dark, buzzy synth tone that follows your pitch
+ * (root + sub-octave + optional fifth). Unvoiced sounds (s, t, k…) switch to noise so
+ * consonants stay crisp after vocoding.
+ */
+class VocoderCarrier extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [
+      { name: 'semitones', defaultValue: -12, minValue: -36, maxValue: 24, automationRate: 'k-rate' },
+      { name: 'chord', defaultValue: 0.5, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
+    ];
+  }
+
+  constructor() {
+    super();
+    this.tracker = new PitchTracker(sampleRate);
+    this.f0 = 110;
+    this.p1 = 0;
+    this.p2 = 0;
+    this.p3 = 0;
+    this.v = 0;
+    this.glide = 1 - Math.exp(-1 / (sampleRate * 0.004));
+    this.vSmooth = 1 - Math.exp(-1 / (sampleRate * 0.008));
+  }
+
+  process(inputs, outputs, parameters) {
+    const input = inputs[0] && inputs[0][0];
+    const output = outputs[0];
+    const out = output[0];
+    if (!out) return true;
+    const semis = parameters.semitones[0];
+    const chord = parameters.chord[0];
+    const shift = Math.pow(2, semis / 12);
+    const tr = this.tracker;
+    const blep = (t, dt) => {
+      if (t < dt) {
+        t /= dt;
+        return t + t - t * t - 1;
+      }
+      if (t > 1 - dt) {
+        t = (t - 1) / dt;
+        return t * t + t + t + 1;
+      }
+      return 0;
+    };
+    for (let n = 0; n < out.length; n++) {
+      tr.push(input ? input[n] : 0);
+      if (tr.voiced) this.f0 += (sampleRate / tr.period - this.f0) * this.glide;
+      this.v += ((tr.voiced ? 1 : 0) - this.v) * this.vSmooth;
+      const root = Math.min(1000, Math.max(25, this.f0 * shift));
+      const d1 = root / sampleRate;
+      const d2 = d1 * 0.5;
+      const d3 = d1 * 1.4983;
+      this.p1 += d1;
+      if (this.p1 >= 1) this.p1 -= 1;
+      this.p2 += d2;
+      if (this.p2 >= 1) this.p2 -= 1;
+      this.p3 += d3;
+      if (this.p3 >= 1) this.p3 -= 1;
+      const saw =
+        2 * this.p1 - 1 - blep(this.p1, d1) +
+        0.6 * (2 * this.p2 - 1 - blep(this.p2, d2)) +
+        chord * 0.5 * (2 * this.p3 - 1 - blep(this.p3, d3));
+      const noise = Math.random() * 2 - 1;
+      out[n] = this.v * (saw * 0.45 + noise * 0.08) + (1 - this.v) * noise * 0.7;
+    }
+    for (let c = 1; c < output.length; c++) output[c].set(out);
+    return true;
+  }
+}
+
 registerProcessor('psola', Psola);
+registerProcessor('vocoder-carrier', VocoderCarrier);
 registerProcessor('pitch-shifter', PitchShifter);
 registerProcessor('noise-gate', NoiseGate);
 registerProcessor('ducker', Ducker);

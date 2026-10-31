@@ -51,7 +51,7 @@ type Persisted = Pick<
   | 'clarity'
 >;
 
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
 
 function loadSettings(): Partial<Persisted> {
   try {
@@ -60,6 +60,10 @@ function loadSettings(): Partial<Persisted> {
       // v2 clarity rework: new echo-guard scale/default, presets changed so drop old tweaks
       delete s.echoGuard;
       delete s.tweaks;
+    }
+    if ((s.version ?? 1) < 3 && s.tweaks) {
+      // v3: Demon was redesigned, so old Demon tweaks no longer fit it
+      delete s.tweaks.demon;
     }
     return s;
   } catch {
@@ -265,7 +269,7 @@ export class AudioEngine {
   }
 
   tweaksFor(id: string): Tweaks {
-    return this.state.tweaks[id] ?? DEFAULT_TWEAKS;
+    return { ...DEFAULT_TWEAKS, ...this.state.tweaks[id] };
   }
 
   selectVoice(voiceId: string) {
