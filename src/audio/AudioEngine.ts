@@ -27,6 +27,7 @@ export interface EngineState {
   sessionMode: SessionMode;
   inputGain: number; // 0–4
   gateDb: number; // -80 … -20
+  clarity: number; // 0 = spooky … 1 = clearest
   echoGuard: number; // 0 … 1
   echoCancel: boolean; // iPhone's built-in call echo cancellation
   muted: boolean;
@@ -47,11 +48,20 @@ type Persisted = Pick<
   | 'sessionMode'
   | 'echoGuard'
   | 'echoCancel'
+  | 'clarity'
 >;
+
+const SETTINGS_VERSION = 2;
 
 function loadSettings(): Partial<Persisted> {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    if ((s.version ?? 1) < 2) {
+      // v2 clarity rework: new echo-guard scale/default, presets changed so drop old tweaks
+      delete s.echoGuard;
+      delete s.tweaks;
+    }
+    return s;
   } catch {
     return {};
   }
@@ -90,6 +100,7 @@ export class AudioEngine {
       inputGain: s.inputGain ?? 1,
       gateDb: s.gateDb ?? -50,
       echoGuard: s.echoGuard ?? 0.9,
+      clarity: s.clarity ?? 0.5,
       echoCancel: s.echoCancel ?? false,
       muted: false,
       latencyMs: null,
@@ -108,7 +119,7 @@ export class AudioEngine {
 
   private update(patch: Partial<EngineState>) {
     this.state = { ...this.state, ...patch };
-    const { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode, echoGuard, echoCancel } =
+    const { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode, echoGuard, echoCancel, clarity } =
       this.state;
     const persisted: Persisted = {
       deviceId,
@@ -121,9 +132,10 @@ export class AudioEngine {
       sessionMode,
       echoGuard,
       echoCancel,
+      clarity,
     };
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, ...persisted }));
     } catch {
       /* private mode etc. */
     }
@@ -284,6 +296,11 @@ export class AudioEngine {
     this.graph?.setMaster(this.state.muted ? 0 : this.state.volume);
   }
 
+  setClarity(clarity: number) {
+    this.update({ clarity });
+    this.applyVoice();
+  }
+
   setEchoGuard(echoGuard: number) {
     this.update({ echoGuard });
     this.graph?.setEchoGuard(echoGuard);
@@ -388,15 +405,16 @@ export class AudioEngine {
     const graph = this.graph;
     if (!graph) return;
     const params = applyTweaks(this.voice.params, this.tweaksFor(this.state.voiceId));
-    graph.apply(params);
+    graph.apply(params, this.state.clarity);
 
     window.clearInterval(this.chaosTimer);
     this.chaosTimer = undefined;
     if (params.chaos) {
-      const jumps = [-12, -8, -5, -3, 0, 3, 5, 7];
+      // stay within ±5 st of the voice's pitch so words remain understandable
+      const jumps = [-5, -3, -1, 0, 2, 4];
       this.chaosTimer = window.setInterval(() => {
-        const s = jumps[Math.floor(Math.random() * jumps.length)] + (params.pitchA + 5);
-        graph.setPitchA(s, Math.random() < 0.5 ? 0.01 : 0.15);
+        const s = jumps[Math.floor(Math.random() * jumps.length)] + params.pitch;
+        graph.setPitch(s, Math.random() < 0.5 ? 0.01 : 0.15);
       }, 450);
     }
   }
@@ -405,8 +423,8 @@ export class AudioEngine {
   private measureLatency(): number | null {
     if (!this.ctx) return null;
     const out = (this.ctx as AudioContext & { outputLatency?: number }).outputLatency ?? 0;
-    // + ~20 ms pitch-shifter window + input buffer estimate
-    return Math.round((this.ctx.baseLatency + out) * 1000 + 20 + 10);
+    // + ~27 ms PSOLA pitch shifter + input buffer estimate
+    return Math.round((this.ctx.baseLatency + out) * 1000 + 27 + 10);
   }
 
   private async requestWakeLock() {

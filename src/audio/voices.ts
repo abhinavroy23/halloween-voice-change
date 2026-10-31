@@ -1,44 +1,59 @@
-/** Every voice is just a set of numbers for the fixed effect chain in graph.ts. */
+/**
+ * Every voice is a set of numbers for the fixed chain in graph.ts.
+ *
+ * Clarity rules the presets follow:
+ * - Your words always come from the MAIN voice (PSOLA: shifts pitch but keeps vowel shape),
+ *   kept within about ±5 semitones.
+ * - Monster/child character comes from a quieter LAYER underneath (granular shifter that
+ *   also moves formants), and distortion only goes on that layer.
+ * - Reverb/echo are sends with pre-delay and are ducked while you speak.
+ * - Presence (2.5–4 kHz) up, mud (300 Hz) down, no harsh low-pass on the voice.
+ */
 export interface VoiceParams {
-  /** Unprocessed voice level (0–1). */
-  dry: number;
-  /** Pitch-shifted voice A. */
-  pitchA: number; // semitones
-  pitchAGain: number;
-  /** Pitch-shifted voice B (layered for "possessed" double voices). */
-  pitchB: number;
-  pitchBGain: number;
-  /** Vibrato on both pitch voices. */
-  vibratoRate: number; // Hz
+  /** Main voice: formant-preserving pitch shift (semitones) and level. */
+  pitch: number;
+  main: number;
+  /** Character layer: formant-shifting pitch (semitones), level, distortion, tone. */
+  layerPitch: number;
+  layer: number;
+  layerDrive: number; // 0–1
+  layerTone: number; // low-pass Hz on the layer
+  /** Vibrato on both voices. */
+  vibratoRate: number;
   vibratoDepth: number; // semitones
   /** Whisper vocoder (voice → breathy noise). */
   whisper: number;
-  /** Ring modulator (robotic / metallic). */
+  /** Ring modulator. */
   ringFreq: number;
   ringMix: number;
-  /** Distortion. */
-  drive: number; // 0–1
+  /** Distortion on the main voice (keep small). */
+  drive: number;
   distMix: number;
-  /** Tone shaping. */
-  highpass: number; // Hz
-  lowpass: number; // Hz
-  bassBoost: number; // dB low shelf @ 150 Hz
-  peakFreq: number;
-  peakGain: number; // dB
+  /** Tone. */
+  highpass: number;
+  lowpass: number;
+  bass: number; // dB low shelf 150 Hz
+  presence: number; // dB @ 3 kHz
+  air: number; // dB high shelf 8 kHz
+  peakFreq: number; // extra character peak
+  peakGain: number;
   /** Metallic comb filter. */
   combMix: number;
   combMs: number;
   combFeedback: number;
-  /** Tremolo (volume wobble). */
+  /** Tremolo. */
   tremoloRate: number;
-  tremoloDepth: number; // 0–1
-  /** Echo. */
-  echoTime: number; // seconds
+  tremoloDepth: number;
+  /** Echo (send). */
+  echoTime: number;
   echoFeedback: number;
   echoMix: number;
-  /** Reverb. */
+  /** Reverb (send). */
   reverbMix: number;
   reverbSeconds: number;
+  preDelay: number; // seconds
+  /** How far reverb/echo duck while you talk (dB). */
+  duck: number;
   /** Faint radio crackle. */
   crackle: number;
   /** Random pitch jumps (poltergeist). */
@@ -56,11 +71,12 @@ export interface Voice {
 }
 
 export const BASE: VoiceParams = {
-  dry: 0,
-  pitchA: 0,
-  pitchAGain: 1,
-  pitchB: 0,
-  pitchBGain: 0,
+  pitch: 0,
+  main: 1,
+  layerPitch: 0,
+  layer: 0,
+  layerDrive: 0,
+  layerTone: 3000,
   vibratoRate: 5,
   vibratoDepth: 0,
   whisper: 0,
@@ -68,9 +84,11 @@ export const BASE: VoiceParams = {
   ringMix: 0,
   drive: 0,
   distMix: 0,
-  highpass: 90,
-  lowpass: 12000,
-  bassBoost: 0,
+  highpass: 120,
+  lowpass: 16000,
+  bass: 0,
+  presence: 4,
+  air: 2,
   peakFreq: 1500,
   peakGain: 0,
   combMix: 0,
@@ -83,6 +101,8 @@ export const BASE: VoiceParams = {
   echoMix: 0,
   reverbMix: 0,
   reverbSeconds: 2,
+  preDelay: 0.05,
+  duck: 12,
   crackle: 0,
   chaos: false,
   level: 1,
@@ -98,134 +118,152 @@ const v = (id: string, name: string, emoji: string, blurb: string, p: Partial<Vo
 
 export const VOICES: Voice[] = [
   v('clean', 'Clean', '🎤', 'No effect – use to test mic & speaker', {
-    pitchAGain: 0,
-    dry: 1,
-    highpass: 60,
+    highpass: 80,
+    presence: 2,
+    air: 1,
   }),
   v('ghost', 'Classic Ghost', '👻', 'Hollow, floating, distant', {
-    pitchA: -3,
-    vibratoRate: 0.7,
-    vibratoDepth: 0.35,
-    highpass: 180,
-    lowpass: 6500,
-    peakFreq: 2500,
-    peakGain: 3,
+    pitch: -2,
+    layerPitch: 12,
+    layer: 0.12,
+    layerTone: 9000,
+    vibratoRate: 0.6,
+    vibratoDepth: 0.25,
+    whisper: 0.2,
+    highpass: 150,
+    presence: 5,
+    air: 4,
     tremoloRate: 0.5,
-    tremoloDepth: 0.25,
-    reverbMix: 0.65,
-    reverbSeconds: 4,
+    tremoloDepth: 0.12,
+    reverbMix: 0.5,
+    reverbSeconds: 3,
+    preDelay: 0.06,
     echoTime: 0.42,
     echoFeedback: 0.25,
-    echoMix: 0.15,
-    level: 1.1,
+    echoMix: 0.12,
+    duck: 14,
   }),
   v('demon', 'Demon', '😈', 'Deep, gravelly, from below', {
-    pitchA: -9,
-    pitchB: -12,
-    pitchBGain: 0.5,
-    drive: 0.55,
-    distMix: 0.45,
-    highpass: 50,
-    lowpass: 5000,
-    bassBoost: 8,
-    reverbMix: 0.3,
-    reverbSeconds: 1.6,
-    level: 0.7,
-  }),
-  v('possessed', 'Possessed', '🫥', 'Two voices at once, one not yours', {
-    dry: 0.55,
-    pitchA: -12,
-    pitchAGain: 0.85,
-    ringFreq: 33,
-    ringMix: 0.35,
-    drive: 0.3,
-    distMix: 0.25,
-    bassBoost: 4,
-    reverbMix: 0.35,
-    reverbSeconds: 2.5,
-    level: 0.95,
-  }),
-  v('wraith', 'Whisper Wraith', '🌬️', 'Breathy whisper all around you', {
-    pitchA: 0,
-    pitchAGain: 0.12,
-    whisper: 1,
-    highpass: 300,
-    lowpass: 9000,
-    reverbMix: 0.55,
-    reverbSeconds: 3.5,
-    echoTime: 0.28,
-    echoFeedback: 0.3,
-    echoMix: 0.2,
-    level: 2.6,
-  }),
-  v('child', 'Creepy Child', '👧', 'Small voice, empty nursery', {
-    pitchA: 5,
-    pitchB: 5.15,
-    pitchBGain: 0.35,
-    vibratoRate: 5.5,
-    vibratoDepth: 0.12,
-    highpass: 220,
-    peakFreq: 3000,
-    peakGain: 3,
-    reverbMix: 0.4,
-    reverbSeconds: 1.8,
-    level: 1,
-  }),
-  v('beyond', 'Voice from Beyond', '📻', 'Haunted radio transmission', {
-    pitchA: -1,
-    vibratoRate: 0.3,
-    vibratoDepth: 0.5,
-    drive: 0.6,
-    distMix: 0.6,
-    highpass: 450,
-    lowpass: 3000,
-    peakFreq: 1400,
-    peakGain: 8,
-    tremoloRate: 7,
-    tremoloDepth: 0.2,
-    crackle: 0.04,
-    reverbMix: 0.15,
-    reverbSeconds: 1,
-    level: 1.2,
-  }),
-  v('crypt', 'Crypt Echo', '🕳️', 'Calling out from a deep tomb', {
-    pitchA: -4,
-    highpass: 120,
-    lowpass: 4500,
-    bassBoost: 3,
-    echoTime: 0.36,
-    echoFeedback: 0.55,
-    echoMix: 0.5,
-    reverbMix: 0.6,
-    reverbSeconds: 5,
-    level: 1,
-  }),
-  v('machine', 'Haunted Machine', '🤖', 'Metallic, cursed animatronic', {
-    pitchA: -2,
-    ringFreq: 90,
-    ringMix: 0.7,
-    combMix: 0.6,
-    combMs: 6,
-    combFeedback: 0.75,
-    highpass: 150,
-    reverbMix: 0.2,
-    reverbSeconds: 1.2,
+    pitch: -5,
+    layerPitch: -12,
+    layer: 0.65,
+    layerDrive: 0.5,
+    layerTone: 1800,
+    highpass: 70,
+    bass: 3,
+    presence: 5,
+    air: 1,
+    reverbMix: 0.25,
+    reverbSeconds: 1.4,
+    preDelay: 0.03,
+    duck: 10,
     level: 0.9,
   }),
-  v('poltergeist', 'Poltergeist', '🌀', 'Unstable, jumping, unpredictable', {
-    pitchA: -5,
-    chaos: true,
-    vibratoRate: 3,
-    vibratoDepth: 0.4,
-    highpass: 150,
-    tremoloRate: 9,
-    tremoloDepth: 0.35,
-    echoTime: 0.18,
-    echoFeedback: 0.4,
-    echoMix: 0.3,
+  v('possessed', 'Possessed', '🫥', 'Two voices at once, one not yours', {
+    pitch: 0,
+    layerPitch: -12,
+    layer: 0.75,
+    layerDrive: 0.3,
+    layerTone: 2200,
+    ringFreq: 30,
+    ringMix: 0.15,
+    highpass: 90,
+    presence: 4,
+    reverbMix: 0.3,
+    reverbSeconds: 2.2,
+    duck: 12,
+    level: 0.9,
+  }),
+  v('wraith', 'Whisper Wraith', '🌬️', 'Breathy whisper all around you', {
+    main: 0.35,
+    whisper: 1,
+    highpass: 250,
+    presence: 5,
+    air: 3,
     reverbMix: 0.45,
     reverbSeconds: 2.5,
-    level: 1,
+    echoTime: 0.28,
+    echoFeedback: 0.3,
+    echoMix: 0.18,
+    duck: 10,
+    level: 1.4,
+  }),
+  v('child', 'Creepy Child', '👧', 'Small voice, empty nursery', {
+    pitch: 4,
+    main: 0.45,
+    layerPitch: 5,
+    layer: 0.85,
+    layerTone: 12000,
+    vibratoRate: 5.5,
+    vibratoDepth: 0.1,
+    highpass: 200,
+    presence: 3,
+    air: 3,
+    reverbMix: 0.3,
+    reverbSeconds: 1.5,
+    duck: 10,
+  }),
+  v('beyond', 'Voice from Beyond', '📻', 'Haunted radio transmission', {
+    pitch: -1,
+    vibratoRate: 0.3,
+    vibratoDepth: 0.3,
+    drive: 0.35,
+    distMix: 0.4,
+    highpass: 350,
+    lowpass: 4500,
+    presence: 3,
+    air: 0,
+    peakFreq: 1800,
+    peakGain: 5,
+    tremoloRate: 6,
+    tremoloDepth: 0.1,
+    crackle: 0.025,
+    reverbMix: 0.12,
+    reverbSeconds: 1,
+    duck: 8,
+    level: 1.1,
+  }),
+  v('crypt', 'Crypt Echo', '🕳️', 'Calling out from a deep tomb', {
+    pitch: -3,
+    highpass: 110,
+    presence: 4,
+    air: 1,
+    echoTime: 0.32,
+    echoFeedback: 0.45,
+    echoMix: 0.35,
+    reverbMix: 0.45,
+    reverbSeconds: 4,
+    preDelay: 0.07,
+    duck: 14,
+  }),
+  v('machine', 'Haunted Machine', '🤖', 'Metallic, cursed animatronic', {
+    pitch: -2,
+    ringFreq: 90,
+    ringMix: 0.35,
+    combMix: 0.35,
+    combMs: 6,
+    combFeedback: 0.6,
+    highpass: 150,
+    presence: 3,
+    reverbMix: 0.15,
+    reverbSeconds: 1.2,
+    duck: 8,
+  }),
+  v('poltergeist', 'Poltergeist', '🌀', 'Unstable, jumping, unpredictable', {
+    pitch: -3,
+    chaos: true,
+    vibratoRate: 3,
+    vibratoDepth: 0.3,
+    highpass: 150,
+    presence: 4,
+    tremoloRate: 9,
+    tremoloDepth: 0.2,
+    echoTime: 0.18,
+    echoFeedback: 0.35,
+    echoMix: 0.25,
+    reverbMix: 0.35,
+    reverbSeconds: 2.2,
+    duck: 12,
   }),
 ];
 
@@ -240,15 +278,19 @@ export interface Tweaks {
 export const DEFAULT_TWEAKS: Tweaks = { pitch: 0, reverb: 1, echo: 1, grit: 0 };
 
 export function applyTweaks(p: VoiceParams, t: Tweaks): VoiceParams {
+  const boost = (base: number, mult: number, extra: number) =>
+    Math.min(1, base * mult + (mult > 1 && base === 0 ? (mult - 1) * extra : 0));
   return {
     ...p,
-    pitchA: p.pitchA + t.pitch,
-    pitchB: p.pitchB + t.pitch,
-    // Clean voice: a pitch tweak should still be audible, so blend in pitch voice.
-    ...(p.dry === 1 && t.pitch !== 0 ? { dry: 0, pitchAGain: 1 } : {}),
-    reverbMix: Math.min(1, p.reverbMix * t.reverb + (t.reverb > 1 && p.reverbMix === 0 ? (t.reverb - 1) * 0.5 : 0)),
-    echoMix: Math.min(1, p.echoMix * t.echo + (t.echo > 1 && p.echoMix === 0 ? (t.echo - 1) * 0.4 : 0)),
-    drive: Math.min(1, p.drive + t.grit),
-    distMix: Math.min(1, p.distMix + t.grit),
+    pitch: p.pitch + t.pitch,
+    reverbMix: boost(p.reverbMix, t.reverb, 0.5),
+    echoMix: boost(p.echoMix, t.echo, 0.4),
+    // Grit goes mostly on the layer so the main voice stays clear.
+    layerDrive: Math.min(1, p.layerDrive + t.grit),
+    layer: p.layer > 0 ? p.layer : t.grit * 0.5,
+    layerPitch: p.layer > 0 ? p.layerPitch + t.pitch : -12 + t.pitch,
+    layerTone: p.layer > 0 ? p.layerTone : 2000,
+    drive: Math.min(1, p.drive + t.grit * 0.3),
+    distMix: Math.min(1, p.distMix + t.grit * 0.2),
   };
 }

@@ -1,10 +1,202 @@
 /* global sampleRate, registerProcessor, AudioWorkletProcessor */
 // Plain JS on purpose: this file is loaded into the AudioWorklet scope as-is.
 
+const MIN_F0 = 75; // Hz – lowest voice pitch we track
+const MAX_F0 = 500; // Hz – highest
+
 /**
- * Low-latency granular pitch shifter (two crossfaded read heads on a delay line).
- * Latency ≈ half the window (~20 ms). `semitones` is a-rate so an LFO can be
- * connected to it for vibrato.
+ * Real-time YIN pitch tracker on a 4× decimated copy of the signal (cheap enough for phones).
+ * Exposes `period` (in full-rate samples) and `voiced`.
+ */
+class PitchTracker {
+  constructor(sr) {
+    this.dec = sr > 30000 ? 4 : 2;
+    const dsr = sr / this.dec;
+    this.minLag = Math.max(2, Math.floor(dsr / MAX_F0));
+    this.maxLag = Math.ceil(dsr / MIN_F0);
+    this.W = this.maxLag; // integration window
+    this.size = 2048;
+    this.mask = this.size - 1;
+    this.buf = new Float32Array(this.size);
+    this.seg = new Float32Array(this.W + this.maxLag);
+    this.d = new Float32Array(this.maxLag + 1);
+    this.bw = 0;
+    this.acc = 0;
+    this.accN = 0;
+    this.cnt = 0;
+    this.hop = 32; // decimated samples between detections (~2.7 ms)
+    this.period = Math.round(sr / 120);
+    this.voiced = false;
+    this.unvoicedRun = 0;
+  }
+
+  push(x) {
+    this.acc += x;
+    if (++this.accN < this.dec) return;
+    this.buf[this.bw++ & this.mask] = this.acc / this.dec;
+    this.acc = 0;
+    this.accN = 0;
+    if (++this.cnt >= this.hop) {
+      this.cnt = 0;
+      this.detect();
+    }
+  }
+
+  detect() {
+    const { W, maxLag, minLag, seg, d, mask, buf } = this;
+    const N = W + maxLag;
+    const start = this.bw - N;
+    let energy = 0;
+    for (let j = 0; j < N; j++) {
+      const v = buf[(start + j) & mask];
+      seg[j] = v;
+      energy += v * v;
+    }
+    if (energy / N < 1e-6) return this.setUnvoiced(); // silence (≈ -60 dBFS)
+    // YIN difference + cumulative-mean normalisation
+    let running = 0;
+    let best = -1;
+    let bestVal = 1e9;
+    let found = -1;
+    for (let tau = 1; tau <= maxLag; tau++) {
+      let s = 0;
+      for (let j = 0; j < W; j++) {
+        const diff = seg[j] - seg[j + tau];
+        s += diff * diff;
+      }
+      running += s;
+      const v = running > 0 ? (s * tau) / running : 1;
+      d[tau] = v;
+      if (tau >= minLag) {
+        if (v < bestVal) {
+          bestVal = v;
+          best = tau;
+        }
+        if (found < 0 && v < 0.15) found = tau;
+        if (found > 0 && tau > found && v > d[tau - 1]) break; // passed the dip
+      }
+    }
+    let tau = best;
+    if (found > 0) {
+      tau = found;
+      while (tau + 1 <= maxLag && d[tau + 1] < d[tau]) tau++;
+    }
+    if (tau < 0 || d[tau] > 0.3) return this.setUnvoiced();
+    // parabolic interpolation
+    let t = tau;
+    if (tau > 1 && tau < maxLag) {
+      const a = d[tau - 1];
+      const b = d[tau];
+      const c = d[tau + 1];
+      const den = a - 2 * b + c;
+      if (den > 0) t = tau + (0.5 * (a - c)) / den;
+    }
+    const p = t * this.dec;
+    if (this.voiced && Math.abs(p / this.period - 1) < 0.2) this.period = this.period * 0.5 + p * 0.5;
+    else this.period = p;
+    this.voiced = true;
+    this.unvoicedRun = 0;
+  }
+
+  setUnvoiced() {
+    // a couple of misses in a row before we drop voicing (avoids flicker)
+    if (++this.unvoicedRun > 2) this.voiced = false;
+  }
+}
+
+/**
+ * TD-PSOLA pitch shifter – changes pitch while keeping the vowel "shape" (formants),
+ * so shifted speech stays clear. Grains two pitch periods long are cut at pitch marks
+ * and re-spaced at period/ratio. Unvoiced sounds (s, t, k…) pass through unshifted.
+ * Latency ≈ 2 × longest period ≈ 27 ms.
+ */
+class Psola extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [{ name: 'semitones', defaultValue: 0, minValue: -24, maxValue: 24, automationRate: 'a-rate' }];
+  }
+
+  constructor() {
+    super();
+    this.size = 16384;
+    this.mask = this.size - 1;
+    this.inBuf = new Float32Array(this.size);
+    this.outBuf = new Float32Array(this.size);
+    this.tracker = new PitchTracker(sampleRate);
+    this.maxT = Math.ceil(sampleRate / MIN_F0);
+    this.minT = Math.floor(sampleRate / MAX_F0);
+    this.Tu = Math.round(sampleRate * 0.005); // grain half-size for unvoiced sound
+    this.L = 2 * this.maxT + 8; // latency
+    this.w = 0; // input write time
+    this.nextS = 0; // next synthesis grain centre (output time)
+    this.lastMark = 0; // last analysis pitch mark (input time)
+  }
+
+  process(inputs, outputs, parameters) {
+    const input = inputs[0] && inputs[0][0];
+    const output = outputs[0];
+    const out = output[0];
+    if (!out) return true;
+    const semis = parameters.semitones;
+    const { inBuf, outBuf, mask, tracker } = this;
+    for (let n = 0; n < out.length; n++) {
+      const x = input ? input[n] : 0;
+      inBuf[this.w & mask] = x;
+      tracker.push(x);
+      this.w++;
+      const o = this.w - this.L;
+      const voiced = tracker.voiced;
+      const T = voiced ? Math.min(this.maxT, Math.max(this.minT, Math.round(tracker.period))) : this.Tu;
+
+      while (this.nextS - T <= o) {
+        const s = Math.round(this.nextS);
+        const ratio = Math.pow(2, (semis.length > 1 ? semis[n] : semis[0]) / 12);
+        // keep the analysis mark near the synthesis time
+        if (this.lastMark > s || this.lastMark < s - 4 * T) this.lastMark = Math.min(s, this.w - T);
+        while (this.lastMark + T <= s) {
+          let cand = this.lastMark + T;
+          if (voiced) {
+            // snap to the local waveform peak so grains line up period-to-period
+            const r = Math.max(1, Math.floor(T * 0.1));
+            let bestJ = cand;
+            let bestV = -1e9;
+            for (let j = cand - r; j <= cand + r && j <= this.w - T; j++) {
+              const v = inBuf[j & mask];
+              if (v > bestV) {
+                bestV = v;
+                bestJ = j;
+              }
+            }
+            cand = bestJ;
+          }
+          this.lastMark = cand;
+        }
+        let mark = this.lastMark;
+        if (mark + T > this.w) mark = this.w - T;
+        const g = voiced ? Math.min(2, Math.max(0.5, 1 / ratio)) : 1;
+        const inv = Math.PI / T;
+        for (let k = -T; k < T; k++) {
+          const pos = s + k;
+          if (pos < o) continue;
+          const win = 0.5 + 0.5 * Math.cos(k * inv);
+          outBuf[pos & mask] += inBuf[(mark + k) & mask] * win * g;
+        }
+        this.nextS += voiced ? T / ratio : T;
+      }
+
+      if (o >= 0) {
+        out[n] = outBuf[o & mask];
+        outBuf[o & mask] = 0;
+      } else out[n] = 0;
+    }
+    for (let c = 1; c < output.length; c++) output[c].set(out);
+    return true;
+  }
+}
+
+/**
+ * Granular pitch shifter (two crossfaded read heads on a delay line). Unlike PSOLA it also
+ * shifts formants – bigger/darker for monster layers, smaller for a child layer.
+ * The grain window is locked to a whole number of detected pitch periods to reduce warble.
  */
 class PitchShifter extends AudioWorkletProcessor {
   static get parameterDescriptors() {
@@ -13,11 +205,14 @@ class PitchShifter extends AudioWorkletProcessor {
 
   constructor() {
     super();
-    this.size = 8192; // power of two ring buffer
+    this.size = 8192;
     this.mask = this.size - 1;
     this.buf = new Float32Array(this.size);
     this.write = 0;
-    this.win = Math.round(sampleRate * 0.04); // 40 ms grain window
+    this.tracker = new PitchTracker(sampleRate);
+    this.targetW = Math.round(sampleRate * 0.035);
+    this.win = this.targetW;
+    this.winSmooth = 1 - Math.exp(-1 / (sampleRate * 0.03));
     this.phase = 0;
   }
 
@@ -36,19 +231,25 @@ class PitchShifter extends AudioWorkletProcessor {
     const out = output[0];
     if (!out) return true;
     const semis = parameters.semitones;
-    const W = this.win;
+    const tr = this.tracker;
     for (let n = 0; n < out.length; n++) {
-      this.buf[this.write & this.mask] = input ? input[n] : 0;
+      const x = input ? input[n] : 0;
+      this.buf[this.write & this.mask] = x;
+      tr.push(x);
+      // A whole number of pitch periods (~35 ms) so each grain restart lands in phase.
+      const target = tr.voiced
+        ? tr.period * Math.max(2, Math.round(this.targetW / tr.period))
+        : this.targetW;
+      this.win += (target - this.win) * this.winSmooth;
+      const W = this.win;
       const s = semis.length > 1 ? semis[n] : semis[0];
       const ratio = Math.pow(2, s / 12);
       this.phase += (1 - ratio) / W;
-      this.phase -= Math.floor(this.phase); // wrap to [0,1)
+      this.phase -= Math.floor(this.phase);
       const p1 = this.phase;
       const p2 = (p1 + 0.5) % 1;
-      // sin² windows offset by half a period sum to 1
       const w1 = Math.sin(Math.PI * p1) ** 2;
-      const w2 = 1 - w1;
-      out[n] = this.read(p1 * W + 1) * w1 + this.read(p2 * W + 1) * w2;
+      out[n] = this.read(p1 * W + 1) * w1 + this.read(p2 * W + 1) * (1 - w1);
       this.write++;
     }
     this.write &= 0x3fffffff;
@@ -58,12 +259,12 @@ class PitchShifter extends AudioWorkletProcessor {
 }
 
 /**
- * Noise gate with hold + smooth attack/release. Keeps the speaker silent between words.
- *
- * Echo guard: input 1 is the app's own speaker output (side-chain). Its envelope is held
- * for ~0.5 s (covers Bluetooth delay + room tail) and scaled by `guard` into an estimate
- * of how loud the speaker leaks into the mic. The gate only opens for sound clearly louder
- * than that leak – i.e. your voice up close – so the speaker's own echo can't loop back.
+ * Noise gate + echo guard.
+ * Input 0: mic. Input 1: the app's own speaker output (side-chain).
+ * - Below `threshold` → fully closed (silence between words).
+ * - Above threshold but not clearly louder than the estimated speaker leak → turned down
+ *   by ~30 dB (not muted, so soft word starts/ends survive).
+ * - Otherwise open, with a 200 ms hold so word endings aren't clipped.
  */
 class NoiseGate extends AudioWorkletProcessor {
   static get parameterDescriptors() {
@@ -82,9 +283,10 @@ class NoiseGate extends AudioWorkletProcessor {
     this.sideEnv = 0;
     this.envCoef = Math.exp(-1 / (sampleRate * 0.01));
     this.sideRelease = Math.exp(-1 / (sampleRate * 0.5));
-    this.attack = 1 - Math.exp(-1 / (sampleRate * 0.003));
-    this.release = 1 - Math.exp(-1 / (sampleRate * 0.12));
-    this.holdSamples = Math.round(sampleRate * 0.12);
+    this.attack = 1 - Math.exp(-1 / (sampleRate * 0.002));
+    this.release = 1 - Math.exp(-1 / (sampleRate * 0.1));
+    this.holdSamples = Math.round(sampleRate * 0.2);
+    this.floor = 0.03; // ≈ -30 dB while the echo guard holds
   }
 
   process(inputs, outputs, parameters) {
@@ -95,7 +297,6 @@ class NoiseGate extends AudioWorkletProcessor {
     if (!out) return true;
     const thr = Math.pow(10, parameters.threshold[0] / 20);
     const guard = parameters.guard[0];
-    // guard 0 → off; 0.01…1 → leak factor -30 dB … +3 dB
     const k = guard > 0 ? Math.pow(10, (-30 + 33 * guard) / 20) : 0;
     for (let n = 0; n < out.length; n++) {
       const x = input ? input[n] : 0;
@@ -104,12 +305,11 @@ class NoiseGate extends AudioWorkletProcessor {
       const as = side ? Math.abs(side[n]) : 0;
       this.sideEnv = as > this.sideEnv ? as : this.sideEnv * this.sideRelease;
       const leak = this.sideEnv * k;
-      // Opening needs to beat the full leak estimate; staying open 70% of it,
-      // so quieter syllables mid-sentence don't chop but echo can't hold it open.
-      const need = this.gain > 0.5 ? Math.max(thr, leak * 0.7) : Math.max(thr, leak);
+      const open = this.gain > 0.5;
+      const need = Math.max(thr, open ? leak * 0.7 : leak);
       if (this.env > need) this.hold = this.holdSamples;
       else if (this.hold > 0) this.hold--;
-      const target = this.hold > 0 ? 1 : 0;
+      const target = this.hold > 0 ? 1 : this.env > thr ? this.floor : 0;
       this.gain += (target - this.gain) * (target > this.gain ? this.attack : this.release);
       out[n] = x * this.gain;
     }
@@ -118,5 +318,48 @@ class NoiseGate extends AudioWorkletProcessor {
   }
 }
 
+/**
+ * Ducker: turns the reverb/echo returns (input 1, stereo) down while you're speaking
+ * (input 0, the gated mic), then lets the ghostly tail swell back in the pauses.
+ */
+class Ducker extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [{ name: 'depth', defaultValue: 12, minValue: 0, maxValue: 40, automationRate: 'k-rate' }];
+  }
+
+  constructor() {
+    super();
+    this.env = 0;
+    this.gain = 1;
+    this.envAtt = 1 - Math.exp(-1 / (sampleRate * 0.005));
+    this.envRel = 1 - Math.exp(-1 / (sampleRate * 0.15));
+    this.duckAtt = 1 - Math.exp(-1 / (sampleRate * 0.02));
+    this.duckRel = 1 - Math.exp(-1 / (sampleRate * 0.35));
+    this.ref = 0.03; // ≈ -30 dBFS voice = full ducking
+  }
+
+  process(inputs, outputs, parameters) {
+    const key = inputs[0] && inputs[0][0];
+    const sig = inputs[1] || [];
+    const output = outputs[0];
+    const len = output[0] ? output[0].length : 128;
+    const floor = Math.pow(10, -parameters.depth[0] / 20);
+    for (let n = 0; n < len; n++) {
+      const a = key ? Math.abs(key[n]) : 0;
+      this.env += (a - this.env) * (a > this.env ? this.envAtt : this.envRel);
+      const amt = Math.min(1, this.env / this.ref);
+      const target = 1 - (1 - floor) * amt;
+      this.gain += (target - this.gain) * (target < this.gain ? this.duckAtt : this.duckRel);
+      for (let c = 0; c < output.length; c++) {
+        const ch = sig[c] || sig[0];
+        output[c][n] = ch ? ch[n] * this.gain : 0;
+      }
+    }
+    return true;
+  }
+}
+
+registerProcessor('psola', Psola);
 registerProcessor('pitch-shifter', PitchShifter);
 registerProcessor('noise-gate', NoiseGate);
+registerProcessor('ducker', Ducker);

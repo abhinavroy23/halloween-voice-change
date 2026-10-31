@@ -23,4 +23,13 @@ npm run build
 Repo **Settings → Pages → Source: GitHub Actions**. Every push to `main` builds and deploys via `.github/workflows/deploy.yml`.
 
 ## How it works
-`src/audio/AudioEngine.ts` (mic, lifecycle) → `src/audio/graph.ts` (one persistent Web Audio chain: noise gate → pitch shifters / whisper vocoder → ring mod → distortion → EQ → comb → tremolo → echo + reverb → limiter). The pitch shifter and noise gate are AudioWorklets in `src/audio/worklets/processors.js`. Voices are just parameter sets in `src/audio/voices.ts`.
+`src/audio/AudioEngine.ts` (mic, lifecycle, settings) → `src/audio/graph.ts`, one persistent Web Audio chain built for clarity:
+
+- **Main voice**: TD-PSOLA pitch shifter (keeps vowel formants, so shifted speech stays understandable)
+- **Character layer** underneath: granular shifter (moves formants: monster or child) with its own distortion
+- Whisper vocoder, ring mod, comb and tremolo, then a **clarity EQ** (mud cut, presence and air boost) and the **voice compressor**
+- Reverb and echo as sends with **pre-delay**, EQ'd, and **ducked** while you speak
+- **Clarity** slider blends a clean copy of the main voice past the weird effects
+- Gate with **echo guard** (side-chained to the speaker output) stops speaker-to-mic loops, then a limiter and soft clip
+
+Worklets (pitch tracker, PSOLA, granular shifter, gate, ducker) live in `src/audio/worklets/processors.js`. Voices are just parameter sets in `src/audio/voices.ts`.

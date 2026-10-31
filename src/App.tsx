@@ -63,6 +63,15 @@ export default function App() {
             format={pctFmt}
             onChange={(v) => engine.setVolume(v)}
           />
+          <Slider
+            label="Clarity  (spooky ↔ crystal clear)"
+            value={state.clarity}
+            min={0}
+            max={1}
+            step={0.05}
+            format={pctFmt}
+            onChange={(v) => engine.setClarity(v)}
+          />
           {state.error && <p className="error">{state.error}</p>}
         </section>
       )}
@@ -122,7 +131,7 @@ export default function App() {
           onChange={(v) => engine.setEchoGuard(v)}
         />
         <p className="hint">
-          Mutes the mic when it's only hearing the speaker. Raise it if you hear repeating echoes; lower it if your voice
+          Turns the mic down when it's only hearing the speaker. Raise it if you hear repeating echoes; lower it if your voice
           cuts out.
         </p>
         <div className="seg" role="group" aria-label="iPhone echo cancellation">
