@@ -57,10 +57,21 @@ class PitchShifter extends AudioWorkletProcessor {
   }
 }
 
-/** Noise gate with hold + smooth attack/release. Keeps the speaker silent between words. */
+/**
+ * Noise gate with hold + smooth attack/release. Keeps the speaker silent between words.
+ *
+ * Echo guard: input 1 is the app's own speaker output (side-chain). Its envelope is held
+ * for ~0.5 s (covers Bluetooth delay + room tail) and scaled by `guard` into an estimate
+ * of how loud the speaker leaks into the mic. The gate only opens for sound clearly louder
+ * than that leak – i.e. your voice up close – so the speaker's own echo can't loop back.
+ */
 class NoiseGate extends AudioWorkletProcessor {
   static get parameterDescriptors() {
-    return [{ name: 'threshold', defaultValue: -50, minValue: -100, maxValue: 0, automationRate: 'k-rate' }];
+    return [
+      { name: 'threshold', defaultValue: -50, minValue: -100, maxValue: 0, automationRate: 'k-rate' },
+      // 0 = off; 0.01…1 → leak factor -30 dB … +3 dB (log-scaled)
+      { name: 'guard', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
+    ];
   }
 
   constructor() {
@@ -68,7 +79,9 @@ class NoiseGate extends AudioWorkletProcessor {
     this.env = 0;
     this.gain = 0;
     this.hold = 0;
+    this.sideEnv = 0;
     this.envCoef = Math.exp(-1 / (sampleRate * 0.01));
+    this.sideRelease = Math.exp(-1 / (sampleRate * 0.5));
     this.attack = 1 - Math.exp(-1 / (sampleRate * 0.003));
     this.release = 1 - Math.exp(-1 / (sampleRate * 0.12));
     this.holdSamples = Math.round(sampleRate * 0.12);
@@ -76,15 +89,25 @@ class NoiseGate extends AudioWorkletProcessor {
 
   process(inputs, outputs, parameters) {
     const input = inputs[0] && inputs[0][0];
+    const side = inputs[1] && inputs[1][0];
     const output = outputs[0];
     const out = output[0];
     if (!out) return true;
     const thr = Math.pow(10, parameters.threshold[0] / 20);
+    const guard = parameters.guard[0];
+    // guard 0 → off; 0.01…1 → leak factor -30 dB … +3 dB
+    const k = guard > 0 ? Math.pow(10, (-30 + 33 * guard) / 20) : 0;
     for (let n = 0; n < out.length; n++) {
       const x = input ? input[n] : 0;
       const ax = Math.abs(x);
       this.env = ax > this.env ? ax : this.env * this.envCoef + ax * (1 - this.envCoef);
-      if (this.env > thr) this.hold = this.holdSamples;
+      const as = side ? Math.abs(side[n]) : 0;
+      this.sideEnv = as > this.sideEnv ? as : this.sideEnv * this.sideRelease;
+      const leak = this.sideEnv * k;
+      // Opening needs to beat the full leak estimate; staying open 70% of it,
+      // so quieter syllables mid-sentence don't chop but echo can't hold it open.
+      const need = this.gain > 0.5 ? Math.max(thr, leak * 0.7) : Math.max(thr, leak);
+      if (this.env > need) this.hold = this.holdSamples;
       else if (this.hold > 0) this.hold--;
       const target = this.hold > 0 ? 1 : 0;
       this.gain += (target - this.gain) * (target > this.gain ? this.attack : this.release);

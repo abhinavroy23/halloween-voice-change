@@ -65,7 +65,7 @@ export class VoiceGraph {
     this.input = g(1);
     const inHp = new BiquadFilterNode(ctx, { type: 'highpass', frequency: 70, Q: 0.7 });
     this.analyser = new AnalyserNode(ctx, { fftSize: 1024, smoothingTimeConstant: 0 });
-    this.gate = new AudioWorkletNode(ctx, 'noise-gate', { outputChannelCount: [1] });
+    this.gate = new AudioWorkletNode(ctx, 'noise-gate', { numberOfInputs: 2, outputChannelCount: [1] });
     this.input.connect(inHp);
     inHp.connect(this.analyser);
     inHp.connect(this.gate);
@@ -190,6 +190,11 @@ export class VoiceGraph {
     const clipper = new WaveShaperNode(ctx, { curve: softClipCurve() });
     this.output = g(1);
     out.connect(this.level).connect(glue).connect(makeup).connect(this.master).connect(limiter).connect(clipper).connect(this.output);
+
+    // Echo guard side-chain: what we send to the speaker → gate input 1.
+    // (Web Audio needs a DelayNode inside any loop; 3 ms is negligible.)
+    const sideDelay = new DelayNode(ctx, { maxDelayTime: 0.05, delayTime: 0.003 });
+    this.output.connect(sideDelay).connect(this.gate, 0, 1);
   }
 
 
@@ -224,6 +229,11 @@ export class VoiceGraph {
 
   setGateThreshold(db: number) {
     this.set(this.gate.parameters.get('threshold')!, db, 0.01);
+  }
+
+  /** 0 = off … 1 = strongest echo guard. */
+  setEchoGuard(amount: number) {
+    this.set(this.gate.parameters.get('guard')!, amount, 0.01);
   }
 
   setInputGain(gain: number) {

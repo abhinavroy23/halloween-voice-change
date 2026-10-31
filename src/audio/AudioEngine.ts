@@ -27,6 +27,8 @@ export interface EngineState {
   sessionMode: SessionMode;
   inputGain: number; // 0–4
   gateDb: number; // -80 … -20
+  echoGuard: number; // 0 … 1
+  echoCancel: boolean; // iPhone's built-in call echo cancellation
   muted: boolean;
   latencyMs: number | null;
   wakeLock: boolean;
@@ -35,7 +37,16 @@ export interface EngineState {
 const STORAGE_KEY = 'ghost-voice-settings-v1';
 type Persisted = Pick<
   EngineState,
-  'deviceId' | 'voiceId' | 'tweaks' | 'volume' | 'inputGain' | 'gateDb' | 'outputMode' | 'sessionMode'
+  | 'deviceId'
+  | 'voiceId'
+  | 'tweaks'
+  | 'volume'
+  | 'inputGain'
+  | 'gateDb'
+  | 'outputMode'
+  | 'sessionMode'
+  | 'echoGuard'
+  | 'echoCancel'
 >;
 
 function loadSettings(): Partial<Persisted> {
@@ -78,6 +89,8 @@ export class AudioEngine {
       sessionMode: s.sessionMode ?? 'auto',
       inputGain: s.inputGain ?? 1,
       gateDb: s.gateDb ?? -50,
+      echoGuard: s.echoGuard ?? 0.9,
+      echoCancel: s.echoCancel ?? false,
       muted: false,
       latencyMs: null,
       wakeLock: false,
@@ -95,8 +108,20 @@ export class AudioEngine {
 
   private update(patch: Partial<EngineState>) {
     this.state = { ...this.state, ...patch };
-    const { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode } = this.state;
-    const persisted: Persisted = { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode };
+    const { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode, echoGuard, echoCancel } =
+      this.state;
+    const persisted: Persisted = {
+      deviceId,
+      voiceId,
+      tweaks,
+      volume,
+      inputGain,
+      gateDb,
+      outputMode,
+      sessionMode,
+      echoGuard,
+      echoCancel,
+    };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
     } catch {
@@ -168,9 +193,10 @@ export class AudioEngine {
   // ---- microphone ------------------------------------------------------------------
   private async openMic(deviceId: string) {
     const base: MediaTrackConstraints = {
-      // Phone-call processing adds delay and mangles effects: turn it all off.
-      echoCancellation: false,
-      noiseSuppression: false,
+      // Phone-call processing adds delay and mangles effects, so it's off unless the
+      // user turns on echo cancellation to fight speaker → mic echo.
+      echoCancellation: this.state.echoCancel,
+      noiseSuppression: this.state.echoCancel,
       autoGainControl: false,
       channelCount: 1,
     };
@@ -258,6 +284,22 @@ export class AudioEngine {
     this.graph?.setMaster(this.state.muted ? 0 : this.state.volume);
   }
 
+  setEchoGuard(echoGuard: number) {
+    this.update({ echoGuard });
+    this.graph?.setEchoGuard(echoGuard);
+  }
+
+  /** Re-opens the mic with the iPhone's echo cancellation on/off. */
+  async setEchoCancel(echoCancel: boolean) {
+    this.update({ echoCancel });
+    if (this.state.status !== 'running') return;
+    try {
+      await this.openMic(this.state.deviceId);
+    } catch (e) {
+      this.update({ error: describeError(e) });
+    }
+  }
+
   setInputGain(inputGain: number) {
     this.update({ inputGain });
     this.graph?.setInputGain(inputGain);
@@ -337,6 +379,7 @@ export class AudioEngine {
     if (!this.graph) return;
     this.graph.setInputGain(this.state.inputGain);
     this.graph.setGateThreshold(this.state.gateDb);
+    this.graph.setEchoGuard(this.state.echoGuard);
     this.graph.setMaster(this.state.muted ? 0 : this.state.volume);
     this.applyVoice();
   }

@@ -111,6 +111,29 @@ export default function App() {
           format={(v) => `${v} dB`}
           onChange={(v) => engine.setGate(v)}
         />
+        <h3>🔁 Echo / feedback</h3>
+        <Slider
+          label="Echo guard"
+          value={state.echoGuard}
+          min={0}
+          max={1}
+          step={0.05}
+          format={(v) => (v === 0 ? 'Off' : pctFmt(v))}
+          onChange={(v) => engine.setEchoGuard(v)}
+        />
+        <p className="hint">
+          Mutes the mic when it's only hearing the speaker. Raise it if you hear repeating echoes; lower it if your voice
+          cuts out.
+        </p>
+        <div className="seg" role="group" aria-label="iPhone echo cancellation">
+          <span>iPhone echo cancellation (strong, may lower volume)</span>
+          <button className={!state.echoCancel ? 'on' : ''} onClick={() => void engine.setEchoCancel(false)}>
+            Off
+          </button>
+          <button className={state.echoCancel ? 'on' : ''} onClick={() => void engine.setEchoCancel(true)}>
+            On
+          </button>
+        </div>
         <p className="hint">
           The orange line on the meter is the gate. Sound below it is muted, so the speaker stays quiet when you're not
           talking. Raise it if you hear hiss or feedback.
@@ -145,7 +168,10 @@ export default function App() {
           🔔 Test speaker beep
         </button>
         <ul className="tips">
-          <li>Keep the phone speaker pointing away from the mic to avoid howling feedback.</li>
+          <li>Biggest echo fix: put the speaker behind you or low on your body, facing away from the DJI mic.</li>
+          <li>Clip the DJI mic close to your mouth and lower Mic gain, so your voice is much louder than the speaker.</li>
+          <li>Turn on the DJI Mic Mini's noise cancelling (in the DJI Mimo app) to reduce room/speaker pickup.</li>
+          <li>Shorter Reverb/Echo in “Tune” means less tail for the mic to re-catch.</li>
           <li>Use the phone volume buttons for overall loudness; avoid Bluetooth speakers (they add a delay).</li>
           <li>Add to Home Screen (Share → Add to Home Screen) for a fullscreen app.</li>
           <li>Screen stays awake while live{state.wakeLock ? ' ✓' : ''}. Keep this tab in front.</li>
