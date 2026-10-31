@@ -8,3 +8,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>,
 );
+
+// Dev-only handle for automated audio tests (stripped from production builds).
+if (import.meta.env.DEV) {
+  void import('./audio/AudioEngine').then(({ engine }) => {
+    (window as unknown as { __engine: unknown }).__engine = engine;
+  });
+}

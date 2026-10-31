@@ -1,5 +1,6 @@
 import workletUrl from './worklets/processors.js?url';
 import { VoiceGraph } from './graph';
+import { BedId, SfxId, Stage } from './stage';
 import { applyTweaks, DEFAULT_TWEAKS, Tweaks, Voice, VOICES } from './voices';
 
 export type Status = 'idle' | 'starting' | 'running' | 'error';
@@ -28,6 +29,8 @@ export interface EngineState {
   inputGain: number; // 0–4
   gateDb: number; // -80 … -20
   clarity: number; // 0 = spooky … 1 = clearest
+  bed: BedId;
+  bedVolume: number; // 0–1
   echoGuard: number; // 0 … 1
   echoCancel: boolean; // iPhone's built-in call echo cancellation
   muted: boolean;
@@ -49,6 +52,7 @@ type Persisted = Pick<
   | 'echoGuard'
   | 'echoCancel'
   | 'clarity'
+  | 'bedVolume'
 >;
 
 const SETTINGS_VERSION = 3;
@@ -80,6 +84,7 @@ export class AudioEngine {
   private listeners = new Set<() => void>();
   private ctx: AudioContext | null = null;
   private graph: VoiceGraph | null = null;
+  private stage: Stage | null = null;
   private stream: MediaStream | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private chaosTimer: number | undefined;
@@ -96,7 +101,7 @@ export class AudioEngine {
       devices: [],
       deviceId: s.deviceId ?? '',
       activeMicLabel: '',
-      voiceId: VOICES.some((v) => v.id === s.voiceId) ? s.voiceId! : 'ghost',
+      voiceId: VOICES.some((v) => v.id === s.voiceId) ? s.voiceId! : 'phantom',
       tweaks: s.tweaks ?? {},
       volume: s.volume ?? 1.5,
       outputMode: s.outputMode ?? 'direct',
@@ -105,6 +110,8 @@ export class AudioEngine {
       gateDb: s.gateDb ?? -50,
       echoGuard: s.echoGuard ?? 0.9,
       clarity: s.clarity ?? 0.5,
+      bed: 'off',
+      bedVolume: s.bedVolume ?? 0.5,
       echoCancel: s.echoCancel ?? false,
       muted: false,
       latencyMs: null,
@@ -123,7 +130,7 @@ export class AudioEngine {
 
   private update(patch: Partial<EngineState>) {
     this.state = { ...this.state, ...patch };
-    const { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode, echoGuard, echoCancel, clarity } =
+    const { deviceId, voiceId, tweaks, volume, inputGain, gateDb, outputMode, sessionMode, echoGuard, echoCancel, clarity, bedVolume } =
       this.state;
     const persisted: Persisted = {
       deviceId,
@@ -137,6 +144,7 @@ export class AudioEngine {
       echoGuard,
       echoCancel,
       clarity,
+      bedVolume,
     };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, ...persisted }));
@@ -166,6 +174,7 @@ export class AudioEngine {
       await resumed;
 
       this.graph = new VoiceGraph(ctx);
+      this.stage = new Stage(ctx, this.graph);
       this.routeOutput();
       this.applyAll();
       ctx.addEventListener('statechange', () => {
@@ -192,6 +201,8 @@ export class AudioEngine {
     this.stream = null;
     this.source?.disconnect();
     this.source = null;
+    this.stage?.dispose();
+    this.stage = null;
     this.graph = null;
     this.outEl?.pause();
     if (this.outEl) this.outEl.srcObject = null;
@@ -203,7 +214,7 @@ export class AudioEngine {
     this.wakeLock = null;
     const nav = navigator as NavigatorWithAudioSession;
     if (nav.audioSession) nav.audioSession.type = 'auto';
-    this.update({ status: 'idle', latencyMs: null, wakeLock: false, activeMicLabel: '' });
+    this.update({ status: 'idle', latencyMs: null, wakeLock: false, activeMicLabel: '', bed: 'off' });
   }
 
   // ---- microphone ------------------------------------------------------------------
@@ -382,6 +393,36 @@ export class AudioEngine {
     }
   }
 
+  // ---- phantom stage ---------------------------------------------------------------------
+  playLine(id: string) {
+    if (this.state.muted) this.toggleMute();
+    void this.stage?.playLine(id);
+  }
+
+  playSfx(id: SfxId) {
+    if (this.state.muted) this.toggleMute();
+    this.stage?.sfx(id);
+  }
+
+  setBed(bed: BedId) {
+    this.update({ bed });
+    this.stage?.setBed(bed);
+  }
+
+  setBedVolume(bedVolume: number) {
+    this.update({ bedVolume });
+    this.graph?.setBedVolume(bedVolume);
+  }
+
+  /** Whoosh, then fade everything out and mute. Tap On/unmute to come back. */
+  vanish() {
+    if (!this.graph || this.state.muted) return;
+    this.stage?.stopLine();
+    this.stage?.sfx('whoosh');
+    this.graph.fadeMaster(0, 1.6);
+    this.update({ muted: true });
+  }
+
   testSpeaker() {
     this.graph?.beep();
   }
@@ -401,6 +442,7 @@ export class AudioEngine {
     this.graph.setInputGain(this.state.inputGain);
     this.graph.setGateThreshold(this.state.gateDb);
     this.graph.setEchoGuard(this.state.echoGuard);
+    this.graph.setBedVolume(this.state.bedVolume);
     this.graph.setMaster(this.state.muted ? 0 : this.state.volume);
     this.applyVoice();
   }

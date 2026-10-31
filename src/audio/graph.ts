@@ -18,6 +18,18 @@ export class VoiceGraph {
   readonly master: GainNode;
   /** Final output; the engine routes it to the speaker (directly or via an <audio> element). */
   readonly output: GainNode;
+  /** Pre-made phantom lines enter here and get the current voice's effects. */
+  readonly clipIn: GainNode;
+  /** Sound effects: dry + concert-hall reverb, not affected by the voice preset. */
+  readonly sfxIn: GainNode;
+  /** Background music/ambience: ducked while you (or a line) speak. */
+  readonly bedIn: GainNode;
+  private bedLevel: GainNode;
+  private hallUntil = 0;
+  private bedActive = false;
+  private hallTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Optional sub-chains that are physically disconnected when a voice doesn't use them. */
+  private links: Record<string, { on: boolean; connect: () => void; disconnect: () => void; timer?: ReturnType<typeof setTimeout> }> = {};
 
   private ctx: AudioContext | OfflineAudioContext;
   private gate: AudioWorkletNode;
@@ -84,6 +96,11 @@ export class VoiceGraph {
     this.input.connect(inHp);
     inHp.connect(this.analyser);
     inHp.connect(this.gate);
+    // Everything downstream listens to voiceIn: your gated mic + any phantom line clips.
+    const voiceIn = g(1);
+    this.gate.connect(voiceIn);
+    this.clipIn = g(1);
+    this.clipIn.connect(voiceIn);
 
     const voiceSum = g(1);
     const eqIn = g(1);
@@ -92,7 +109,7 @@ export class VoiceGraph {
     this.psola = new AudioWorkletNode(ctx, 'psola', mono);
     this.mainGain = g(1);
     this.clarityGain = g(0);
-    this.gate.connect(this.psola).connect(this.mainGain).connect(voiceSum);
+    voiceIn.connect(this.psola).connect(this.mainGain).connect(voiceSum);
     this.mainGain.connect(this.clarityGain).connect(eqIn); // clean copy that skips the weird FX
 
     // --- character LAYER: pitch + formant shift + its own distortion -------------------
@@ -104,8 +121,10 @@ export class VoiceGraph {
     this.layerPsolaGain = g(0);
     const granAlign = new DelayNode(ctx, { maxDelayTime: 0.05, delayTime: 0.01 });
     const layerIn = g(1);
-    this.gate.connect(this.layerShift).connect(granAlign).connect(this.layerGranGain).connect(layerIn);
-    this.gate.connect(this.layerPsola).connect(this.layerPsolaGain).connect(layerIn);
+    this.layerShift.connect(granAlign).connect(this.layerGranGain).connect(layerIn);
+    this.layerPsola.connect(this.layerPsolaGain).connect(layerIn);
+    this.addLink('layerGran', [[voiceIn, this.layerShift]]);
+    this.addLink('layerPsola', [[voiceIn, this.layerPsola]]);
     const layerSum = g(1);
     this.layerClean = g(1);
     this.layerPre = g(1);
@@ -129,14 +148,26 @@ export class VoiceGraph {
     this.whisperOut = g(0);
     const noise = new AudioBufferSourceNode(ctx, { buffer: makeNoiseBuffer(ctx), loop: true });
     noise.start();
-    this.buildVocoder(this.gate, noise, this.whisperOut, { bands: 16, lo: 180, hi: 7500, q: 6, smooth: 35, makeup: 6 });
+    const whisperIn = g(1);
+    const whisperCarrier = g(1);
+    this.buildVocoder(whisperIn, whisperCarrier, this.whisperOut, { bands: 16, lo: 180, hi: 7500, q: 6, smooth: 35, makeup: 6 });
+    this.addLink('whisper', [
+      [voiceIn, whisperIn],
+      [noise, whisperCarrier],
+    ]);
     this.whisperOut.connect(voiceSum);
 
     // --- synth vocoder (Vocoder Demon): your voice "plays" a pitch-following dark synth ---
     this.vocoderOut = g(0);
     this.carrier = new AudioWorkletNode(ctx, 'vocoder-carrier', mono);
-    this.gate.connect(this.carrier);
-    this.buildVocoder(this.gate, this.carrier, this.vocoderOut, { bands: 22, lo: 100, hi: 8000, q: 5, smooth: 50, makeup: 9 });
+    const vocIn = g(1);
+    const vocCarrier = g(1);
+    this.buildVocoder(vocIn, vocCarrier, this.vocoderOut, { bands: 22, lo: 100, hi: 8000, q: 5, smooth: 50, makeup: 9 });
+    this.addLink('vocoder', [
+      [voiceIn, this.carrier],
+      [voiceIn, vocIn],
+      [this.carrier, vocCarrier],
+    ]);
     // Line the vocoder up with the PSOLA voice (≈27 ms later) so mixing them doesn't smear.
     const vocAlign = new DelayNode(ctx, { maxDelayTime: 0.1, delayTime: psolaLatency(ctx.sampleRate) });
     this.vocoderOut.connect(vocAlign).connect(voiceSum);
@@ -237,7 +268,7 @@ export class VoiceGraph {
     const fxHp = new BiquadFilterNode(ctx, { type: 'highpass', frequency: 250, Q: 0.7 });
     const fxLp = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 6000, Q: 0.7 });
     this.ducker = new AudioWorkletNode(ctx, 'ducker', { numberOfInputs: 2, outputChannelCount: [2] });
-    this.gate.connect(this.ducker, 0, 0); // key: your (gated) voice
+    voiceIn.connect(this.ducker, 0, 0); // key: your (gated) voice + lines
     fx.connect(fxHp).connect(fxLp).connect(this.ducker, 0, 1);
     this.ducker.connect(mix);
 
@@ -255,10 +286,60 @@ export class VoiceGraph {
     this.output = g(1);
     mix.connect(this.level).connect(this.master).connect(limiter).connect(clipper).connect(this.output);
 
+    // --- phantom stage: sound effects + background beds -----------------------------
+    // Own concert-hall reverb (static), bypasses the voice preset's level/effects.
+    const hall = new ConvolverNode(ctx, { buffer: getImpulse(ctx, 3.5) });
+    const hallReturn = g(0.5);
+    hall.connect(hallReturn).connect(this.master);
+    this.sfxIn = g(1);
+    this.sfxIn.connect(this.master);
+    this.bedIn = g(1);
+    this.bedLevel = g(0.5);
+    const bedDucker = new AudioWorkletNode(ctx, 'ducker', { numberOfInputs: 2, outputChannelCount: [2] });
+    bedDucker.parameters.get('depth')!.value = 14;
+    voiceIn.connect(bedDucker, 0, 0);
+    this.bedIn.connect(this.bedLevel).connect(bedDucker, 0, 1);
+    const bedHall = g(0.6);
+    bedDucker.connect(this.master);
+    bedDucker.connect(bedHall);
+    // The hall only runs while a sound effect or background is playing (saves CPU).
+    this.addLink('hall', [
+      [this.sfxIn, hall],
+      [bedHall, hall],
+    ]);
+
     // Echo guard side-chain: what we send to the speaker → gate input 1.
     // (Web Audio needs a DelayNode inside any loop; 3 ms is negligible.)
     const sideDelay = new DelayNode(ctx, { maxDelayTime: 0.05, delayTime: 0.003 });
     this.output.connect(sideDelay).connect(this.gate, 0, 1);
+  }
+
+  private addLink(name: string, pairs: [AudioNode, AudioNode][]) {
+    this.links[name] = {
+      on: false,
+      connect: () => pairs.forEach(([a, b]) => a.connect(b)),
+      disconnect: () => pairs.forEach(([a, b]) => a.disconnect(b)),
+    };
+  }
+
+  /**
+   * Connect a sub-chain only while a voice uses it, so the phone doesn't spend CPU on
+   * effects nobody hears. Disconnects wait for the fade-out to finish (no clicks).
+   */
+  private setLink(name: string, on: boolean) {
+    const l = this.links[name];
+    clearTimeout(l.timer);
+    if (on && !l.on) {
+      l.connect();
+      l.on = true;
+    } else if (!on && l.on) {
+      const off = () => {
+        l.disconnect();
+        l.on = false;
+      };
+      if (this.ctx instanceof OfflineAudioContext) off();
+      else l.timer = setTimeout(off, 300);
+    }
   }
 
   /** Channel vocoder: the voice's band envelopes shape the matching bands of a carrier. */
@@ -303,6 +384,41 @@ export class VoiceGraph {
     this.set(this.input.gain, gain);
   }
 
+  /** Keep the stage hall reverb running for `seconds` (sound effect + its tail). */
+  holdHall(seconds: number) {
+    this.hallUntil = Math.max(this.hallUntil, this.ctx.currentTime + seconds + 4);
+    this.updateHall();
+  }
+
+  setBedActive(on: boolean) {
+    this.bedActive = on;
+    this.updateHall();
+  }
+
+  private updateHall() {
+    const needed = this.bedActive || this.ctx.currentTime < this.hallUntil;
+    clearTimeout(this.hallTimer);
+    if (needed) {
+      this.setLink('hall', true);
+      if (!this.bedActive) {
+        this.hallTimer = setTimeout(() => this.updateHall(), (this.hallUntil - this.ctx.currentTime) * 1000 + 50);
+      }
+    } else this.setLink('hall', false);
+  }
+
+  setBedVolume(v: number) {
+    this.set(this.bedLevel.gain, v, 0.1);
+  }
+
+  /** Smoothly fade the master (used by Vanish). */
+  fadeMaster(gain: number, seconds: number) {
+    this.set(this.master.gain, gain, seconds / 3);
+  }
+
+  get context() {
+    return this.ctx;
+  }
+
   setMaster(gain: number) {
     this.set(this.master.gain, gain, 0.02);
   }
@@ -330,6 +446,10 @@ export class VoiceGraph {
     const psolaLayer = p.layerEngine === 'psola';
     this.set(this.layerPsolaGain.gain, psolaLayer ? 1 : 0);
     this.set(this.layerGranGain.gain, psolaLayer ? 0 : 1);
+    this.setLink('layerPsola', p.layer > 0 && psolaLayer);
+    this.setLink('layerGran', p.layer > 0 && !psolaLayer);
+    this.setLink('whisper', p.whisper > 0);
+    this.setLink('vocoder', p.vocoder > 0);
     this.set(this.layerGain.gain, p.layer);
     const layerMix = Math.min(1, p.layerDrive * 2);
     this.set(this.layerClean.gain, 1 - layerMix);

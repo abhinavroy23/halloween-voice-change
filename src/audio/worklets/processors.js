@@ -144,6 +144,12 @@ class Psola extends AudioWorkletProcessor {
     const output = outputs[0];
     const out = output[0];
     if (!out) return true;
+    if (!(inputs[0] && inputs[0].length)) {
+      // nothing connected (voice doesn't use this) → skip the work
+      out.fill(0);
+      for (let c = 1; c < output.length; c++) output[c].fill(0);
+      return true;
+    }
     const semis = parameters.semitones;
     const fr = parameters.formant[0];
     const rough = parameters.roughness[0];
@@ -266,6 +272,12 @@ class PitchShifter extends AudioWorkletProcessor {
     const output = outputs[0];
     const out = output[0];
     if (!out) return true;
+    if (!(inputs[0] && inputs[0].length)) {
+      // nothing connected (voice doesn't use this) → skip the work
+      out.fill(0);
+      for (let c = 1; c < output.length; c++) output[c].fill(0);
+      return true;
+    }
     const semis = parameters.semitones;
     const tr = this.tracker;
     for (let n = 0; n < out.length; n++) {
@@ -425,6 +437,12 @@ class VocoderCarrier extends AudioWorkletProcessor {
     const output = outputs[0];
     const out = output[0];
     if (!out) return true;
+    if (!(inputs[0] && inputs[0].length)) {
+      // nothing connected (voice doesn't use this) → skip the work
+      out.fill(0);
+      for (let c = 1; c < output.length; c++) output[c].fill(0);
+      return true;
+    }
     const semis = parameters.semitones[0];
     const chord = parameters.chord[0];
     const shift = Math.pow(2, semis / 12);

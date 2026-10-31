@@ -4,6 +4,8 @@ import { VoiceGrid } from './components/VoiceGrid';
 import { DevicePicker } from './components/DevicePicker';
 import { LevelMeter } from './components/LevelMeter';
 import { Slider } from './components/Slider';
+import { StagePanel } from './components/StagePanel';
+import { PocketMode } from './components/PocketMode';
 
 const signed = (v: number) => (v > 0 ? `+${v}` : `${v}`);
 const pctFmt = (v: number) => `${Math.round(v * 100)}%`;
@@ -12,6 +14,8 @@ export default function App() {
   const { state, engine } = useAudioEngine();
   const [showTune, setShowTune] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
+  const [showStage, setShowStage] = useState(true);
+  const [pocket, setPocket] = useState(false);
   const running = state.status === 'running';
   const voice = engine.voice;
   const tweaks = engine.tweaksFor(state.voiceId);
@@ -75,6 +79,11 @@ export default function App() {
           {state.error && <p className="error">{state.error}</p>}
         </section>
       )}
+
+      <details open={showStage} onToggle={(e) => setShowStage((e.target as HTMLDetailsElement).open)}>
+        <summary>🎭 Phantom stage</summary>
+        <StagePanel state={state} onPocket={() => setPocket(true)} />
+      </details>
 
       <h2>
         {voice.emoji} {voice.name}
@@ -207,6 +216,7 @@ export default function App() {
         </ul>
       </details>
       <footer>Happy Halloween 🎃</footer>
+      {pocket && running && <PocketMode onExit={() => setPocket(false)} />}
     </div>
   );
 }

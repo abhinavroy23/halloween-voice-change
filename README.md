@@ -3,7 +3,14 @@
 Takes your voice from a microphone (built-in or a DJI Mic plugged into the phone), turns it into a ghost voice in real time, and plays it through the phone speaker. It's a static React site that runs entirely in the browser, with no server.
 
 ## Voices
-Clean (test) · Classic Ghost · Demon · Vocoder Demon · Possessed · Whisper Wraith · Creepy Child · Voice from Beyond · Crypt Echo · Haunted Machine · Poltergeist. Each one can be tuned in the **Voice Lab** (Pitch, Size, Growl, Grit, Darkness, Reverb, Echo), and your changes are saved on the phone.
+Clean (test) · Phantom · Voice from the Walls · Classic Ghost · Demon · Vocoder Demon · Possessed · Whisper Wraith · Creepy Child · Voice from Beyond · Crypt Echo · Haunted Machine · Poltergeist. Each one can be tuned in the **Voice Lab** (Pitch, Size, Growl, Grit, Darkness, Reverb, Echo), and your changes are saved on the phone.
+
+## Phantom stage
+- **Lines**: 14 original pre-made lines, spoken through whichever voice is selected. Generated offline with the [Flite](http://www.festvox.org/flite/) speech engine (`rms` voice), see `public/lines/`.
+- **Sound effects**, synthesized in the browser: organ stab, Toccata (opening of Bach's Toccata and Fugue in D minor, public domain), thunder, bell toll, chandelier crash, door creak, whoosh.
+- **Background**: organ drone, music box (original melody) or haunted ambience. It dips automatically while anyone speaks.
+- **Vanish**: a whoosh, then everything fades out and mutes.
+- **Pocket mode**: black, touch-proof screen. Audio keeps running; hold 2 s to unlock.
 
 ## Using it on iPhone
 1. Open the site in Safari, tap **Tap to Summon**, and allow the microphone.
