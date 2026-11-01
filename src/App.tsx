@@ -39,8 +39,12 @@ export default function App() {
 
       {!running ? (
         <section className="start">
-          <button className="big start-btn" onClick={() => void engine.start()} disabled={state.status === 'starting'}>
+          <button className="big start-btn" onClick={() => void engine.start(true)} disabled={state.status === 'starting'}>
             {state.status === 'starting' ? 'Summoning…' : 'Tap to Summon 🕯️'}
+          </button>
+          <button className="big nomic-btn" onClick={() => void engine.start(false)} disabled={state.status === 'starting'}>
+            🔇 Start without microphone
+            <span className="sub">Lines, sound effects &amp; background only</span>
           </button>
           <p className="hint">
             Allow microphone access. Start with <b>Clean</b> at low volume to check the speaker, then pick a ghost.
@@ -57,7 +61,21 @@ export default function App() {
               ⏹ Stop
             </button>
           </div>
-          <LevelMeter gateDb={state.gateDb} active={running} />
+          {state.micEnabled ? (
+            <div className="row mic-row">
+              <LevelMeter gateDb={state.gateDb} active={running} />
+              <button className="small" onClick={() => engine.disableMic()} title="Turn microphone off">
+                🎙️ Mic off
+              </button>
+            </div>
+          ) : (
+            <div className="nomic-card">
+              <span>🔇 Microphone is off: lines, sound effects and background still work.</span>
+              <button className="small" onClick={() => void engine.enableMic()}>
+                🎙️ Turn on mic
+              </button>
+            </div>
+          )}
           <Slider
             label="Volume"
             value={state.volume}

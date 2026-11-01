@@ -96,3 +96,11 @@ h3 { font-size: 0.95rem; margin: 20px 0 0; }
 .pocket-hint { color: #1c1c1c; font-size: 0.75rem; margin-bottom: max(24px, env(safe-area-inset-bottom)); text-align: center; width: 140px; }
 .pocket-bar { height: 2px; background: #333; margin-top: 6px; transform-origin: left; }
 .stage .seg button { font-size: 0.8rem; padding: 10px 4px; }
+
+.nomic-btn { width: 100%; background: var(--panel-2); display: flex; flex-direction: column; gap: 4px; font-size: 1.05rem; }
+.nomic-btn .sub { font-size: 0.8rem; font-weight: 500; color: var(--muted); }
+.mic-row { align-items: center; }
+.mic-row .meter { flex: 1; }
+.mic-row .small { white-space: nowrap; padding: 6px 10px; font-size: 0.8rem; }
+.nomic-card { display: flex; align-items: center; gap: 10px; background: var(--panel); border-radius: 12px; padding: 10px 12px; font-size: 0.85rem; color: var(--muted); }
+.nomic-card .small { white-space: nowrap; color: var(--text); }

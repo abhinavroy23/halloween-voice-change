@@ -31,6 +31,8 @@ export interface EngineState {
   clarity: number; // 0 = spooky … 1 = clearest
   bed: BedId;
   bedVolume: number; // 0–1
+  /** false = "stage only": lines, effects and backgrounds without microphone access. */
+  micEnabled: boolean;
   echoGuard: number; // 0 … 1
   echoCancel: boolean; // iPhone's built-in call echo cancellation
   muted: boolean;
@@ -112,6 +114,7 @@ export class AudioEngine {
       clarity: s.clarity ?? 0.5,
       bed: 'off',
       bedVolume: s.bedVolume ?? 0.5,
+      micEnabled: true,
       echoCancel: s.echoCancel ?? false,
       muted: false,
       latencyMs: null,
@@ -156,15 +159,19 @@ export class AudioEngine {
 
   // ---- lifecycle -----------------------------------------------------------------
   /** Must be called from a tap (browsers only allow audio after a user gesture). */
-  async start() {
+  async start(withMic = true) {
     if (this.state.status === 'running' || this.state.status === 'starting') return;
-    if (!navigator.mediaDevices?.getUserMedia) {
-      this.update({ status: 'error', error: 'Microphone access needs HTTPS and a modern browser (Safari / Chrome).' });
+    if (withMic && !navigator.mediaDevices?.getUserMedia) {
+      this.update({
+        status: 'error',
+        error: 'Microphone access needs HTTPS and a modern browser (Safari / Chrome). You can still start without the microphone.',
+      });
       return;
     }
-    this.update({ status: 'starting', error: null });
+    this.update({ status: 'starting', error: null, micEnabled: withMic });
     try {
-      this.applySessionMode();
+      if (withMic) this.applySessionMode();
+      else this.setPlaybackSession();
 
       const ctx = new AudioContext({ latencyHint: 'interactive' });
       this.ctx = ctx;
@@ -184,8 +191,8 @@ export class AudioEngine {
         }
       });
 
-      await this.openMic(this.state.deviceId);
-      this.update({ status: 'running', latencyMs: this.measureLatency() });
+      if (withMic) await this.openMic(this.state.deviceId);
+      this.update({ status: 'running', latencyMs: withMic ? this.measureLatency() : null });
       void this.requestWakeLock();
     } catch (e) {
       console.error(e);
@@ -197,10 +204,7 @@ export class AudioEngine {
   async stop() {
     window.clearInterval(this.chaosTimer);
     this.chaosTimer = undefined;
-    this.stream?.getTracks().forEach((t) => t.stop());
-    this.stream = null;
-    this.source?.disconnect();
-    this.source = null;
+    this.closeMic();
     this.stage?.dispose();
     this.stage = null;
     this.graph = null;
@@ -218,6 +222,45 @@ export class AudioEngine {
   }
 
   // ---- microphone ------------------------------------------------------------------
+  private closeMic() {
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+    this.source?.disconnect();
+    this.source = null;
+  }
+
+  /** No mic: iOS treats the page as normal media (louder, Bluetooth OK, ignores silent switch). */
+  private setPlaybackSession() {
+    const nav = navigator as NavigatorWithAudioSession;
+    if (!nav.audioSession) return;
+    try {
+      nav.audioSession.type = 'playback';
+    } catch {
+      /* unsupported */
+    }
+  }
+
+  /** Turn the mic on while running in stage-only mode (call from a tap). */
+  async enableMic() {
+    if (this.state.status !== 'running' || this.state.micEnabled) return;
+    try {
+      this.applySessionMode();
+      await this.openMic(this.state.deviceId);
+      this.update({ micEnabled: true, error: null, latencyMs: this.measureLatency() });
+    } catch (e) {
+      this.setPlaybackSession();
+      this.update({ error: describeError(e) });
+    }
+  }
+
+  /** Turn the mic off but keep lines, effects and backgrounds running. */
+  disableMic() {
+    if (!this.state.micEnabled) return;
+    this.closeMic();
+    this.setPlaybackSession();
+    this.update({ micEnabled: false, activeMicLabel: '', latencyMs: null });
+  }
+
   private async openMic(deviceId: string) {
     const base: MediaTrackConstraints = {
       // Phone-call processing adds delay and mangles effects, so it's off unless the
@@ -257,7 +300,7 @@ export class AudioEngine {
 
   async selectDevice(deviceId: string) {
     this.update({ deviceId });
-    if (this.state.status !== 'running') return;
+    if (this.state.status !== 'running' || !this.state.micEnabled) return;
     try {
       await this.openMic(deviceId);
     } catch (e) {
@@ -324,7 +367,7 @@ export class AudioEngine {
   /** Re-opens the mic with the iPhone's echo cancellation on/off. */
   async setEchoCancel(echoCancel: boolean) {
     this.update({ echoCancel });
-    if (this.state.status !== 'running') return;
+    if (this.state.status !== 'running' || !this.state.micEnabled) return;
     try {
       await this.openMic(this.state.deviceId);
     } catch (e) {
@@ -351,9 +394,10 @@ export class AudioEngine {
   /** Changing the iOS session type only takes effect on a fresh start, so restart if live. */
   async setSessionMode(sessionMode: SessionMode) {
     this.update({ sessionMode });
-    if (this.state.status === 'running') {
+    // Only matters while the mic is on (stage-only mode always uses plain playback).
+    if (this.state.status === 'running' && this.state.micEnabled) {
       await this.stop();
-      await this.start();
+      await this.start(true);
     }
   }
 
@@ -494,7 +538,7 @@ export class AudioEngine {
 function describeError(e: unknown): string {
   if (e instanceof DOMException) {
     if (e.name === 'NotAllowedError')
-      return 'Microphone permission was denied. On iPhone: Settings → Safari → Microphone → Allow, then reload.';
+      return 'Microphone permission was denied. On iPhone: Settings → Safari → Microphone → Allow, then reload. Or use “Start without microphone” for lines and sound effects.';
     if (e.name === 'NotFoundError') return 'No microphone found.';
     if (e.name === 'NotReadableError') return 'The microphone is busy in another app. Close it and try again.';
   }

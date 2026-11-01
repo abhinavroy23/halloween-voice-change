@@ -11,6 +11,7 @@ Clean (test) · Phantom · Voice from the Walls · Classic Ghost · Demon · Voc
 - **Background**: organ drone, music box (original melody) or haunted ambience. It dips automatically while anyone speaks.
 - **Vanish**: a whoosh, then everything fades out and mutes.
 - **Pocket mode**: black, touch-proof screen. Audio keeps running; hold 2 s to unlock.
+- **Start without microphone**: lines, sound effects and backgrounds with no mic permission (iPhone then uses normal media playback: louder, Bluetooth-friendly, ignores the silent switch). Turn the mic on or off any time.
 
 ## Using it on iPhone
 1. Open the site in Safari, tap **Tap to Summon**, and allow the microphone.
